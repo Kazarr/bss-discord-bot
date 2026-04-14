@@ -20,7 +20,12 @@ export type ConversationPhase =
   | 'collecting'
   | 'summarizing'
   | 'confirming'
-  | 'done';
+  | 'done'
+  | 'v2-analyzing'
+  | 'v2-story-drafting'
+  | 'v2-research-investigating'
+  | 'v2-workbench'
+  | 'v2-proposing-artifacts';
 
 export interface ConversationMessage {
   role: 'user' | 'assistant';
@@ -33,6 +38,7 @@ export interface ConversationState {
   messages: ConversationMessage[];
   phase: ConversationPhase;
   summary?: string;
+  commandType?: 'issue' | 'analyze' | 'story' | 'research' | 'workbench';
 }
 
 export interface IssueData {
@@ -53,4 +59,10 @@ export interface SimilarityResult {
   matched: boolean;
   issue?: GitHubIssue;
   confidence?: string;
+}
+
+export interface ArtifactProposal {
+  type: 'analysis' | 'user-story' | 'research';
+  title: string;
+  content: string;
 }

@@ -1,11 +1,21 @@
 import { REST, Routes } from 'discord.js';
 import { config } from '../config.js';
 import { issueCommand } from './issue.js';
+import { analyzeCommand } from './analyze.js';
+import { storyCommand } from './story.js';
+import { researchCommand } from './research.js';
+import { workbenchCommand } from './workbench.js';
 
 export async function deployCommands(): Promise<void> {
   const rest = new REST({ version: '10' }).setToken(config.discord.token);
 
-  const commands = [issueCommand.toJSON()];
+  const commands = [
+    issueCommand.toJSON(),
+    analyzeCommand.toJSON(),
+    storyCommand.toJSON(),
+    researchCommand.toJSON(),
+    workbenchCommand.toJSON(),
+  ];
 
   try {
     console.log('Registering slash commands...');

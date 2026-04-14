@@ -1,19 +1,18 @@
 # Accumulated Project Knowledge
 
-> Auto-maintained by Knowledge Agent. Last updated: 2026-03-31
+> Auto-maintained by Knowledge Agent. Last updated: 2026-04-14
 > Contains resolved questions and verified facts from pipeline runs.
+> Current run: v2 scope assessment and v1 convention verification
 
 ## Project Bootstrap
 
-**Status:** Greenfield project — no source code exists yet. Pipeline Phase 0.5 (Knowledge) bootstrapped from CLAUDE.md + pipeline artifacts (codebase-map.md, plan.md).
+**Status (v1):** Greenfield project — no source code exists yet. v1 planning phase complete (CLAUDE.md, conventions, architecture documented in .claude/context/).
 
-**Artifacts present:**
-- `.claude/pipeline/requirements.md` — approved requirements (Gate 1 passed)
-- `.claude/pipeline/codebase-map.md` — technology research, critical findings
-- `.claude/pipeline/plan.md` — approved implementation plan with 10 TASKs (Gate 2 pending)
-- `.claude/pipeline/decisions.md` — decision log
+**v1 Pipeline Artifacts:** Original requirements.md, codebase-map.md, plan.md, decisions.md from v1 pipeline run were referenced in knowledge.md but are no longer in .claude/pipeline/ (likely archived or passed to Implementor phase as output).
 
-**Next phase:** Run `/sw-dev:sw-dev` and instruct pipeline to continue from Phase 4 (Implementor) using existing artifacts.
+**v1 Next phase:** Phase 4 (Implementor) to begin source implementation based on plan.md (10 TASKs documented in v1 knowledge.md below).
+
+**v2 Status:** Planning phase — scope informally noted per task briefing. No formal requirements or implementation plan yet (awaiting Clarifier formal approval in future pipeline run).
 
 ---
 
@@ -326,12 +325,71 @@ SIMILARITY_THRESHOLD=0.7  # optional, used in prompt
 
 ---
 
+## v2 Scope & Extensibility (Verified 2026-04-14)
+
+Per requirements.md (Gate 1 approved), v2 adds four new commands with Agent SDK integration:
+- **`/analyze`** — Code-aware analysis with Agent SDK spawning
+- **`/story`** — INVEST-style user story generation (optional code context)
+- **`/research`** — Investigation notes (optional code context)
+- **`/workbench`** — Free-form conversation with optional artifact proposal
+
+**Architecture Pattern:**
+- v1 and v2 are **isolated workflows** — no v1 code path modified
+- v2 extends (does not replace) MessageHandler state machine, types, services
+- New phase values added to `ConversationPhase` enum
+- New handlers added to MessageHandler switch statement
+- New command files in `src/commands/` directory
+- New service: `AgentService` for Claude Agent SDK spawning
+
+**Extensibility Points Mapped:**
+1. `src/types/index.ts` — Extend `ConversationPhase` enum + add optional `commandType` field
+2. `src/commands/index.ts` — Register four new commands in `deployCommands()`
+3. `src/index.ts` (line 38-40) — Route new commands in InteractionCreate handler
+4. `src/handlers/message.handler.ts` (line 51-57 switch) — Add v2 phase cases, preserve v1
+5. `src/services/claude.service.ts` — Add new artifact generation methods
+6. `src/services/github.service.ts` — No changes (labels already supported)
+7. `src/services/thread.service.ts` — No changes (reused as-is)
+
+**v1 Code Paths Unaffected:**
+- `/issue` command handler unchanged
+- v1 phases (collecting → summarizing → confirming → done) isolated in switch cases
+- v1 tests remain valid and unmodified
+- v1 GitHub integration (createIssue, addComment) reused unchanged
+
+**Test Infrastructure:**
+- ESM mocking pattern (`vi.hoisted()`) REQUIRED for v2 Agent SDK mocks
+- Mock Agent SDK session, tools, and responses (file read, ls, grep)
+- Existing v1 test patterns sufficient for v2
+
+**Critical Unverified Assumptions (v2 Planner to Research):**
+1. **Agent SDK details** — Package name, version, Node.js/ESM compatibility, session API, tool configuration
+2. **Admin permission check** — Discord.js v14 `PermissionsBitField.Flags.Administrator` API pattern
+3. **Git clone strategy** — Clone location, freshness heuristic, Node.js package choice (simple-git vs isomorphic-git)
+4. **Workbench artifact proposal** — Exact heuristic for triggering artifact proposal based on conversation
+5. **Label management** — Race condition handling if labels don't exist (create vs pre-create vs ignore)
+
+**Impact on v1 Implementation:**
+- Phase 4 (v1 Implementor) can proceed independently
+- v1 tests should pass without modification after implementation
+- No env vars required for v2 (reuses v1 config)
+- No new Discord intents or permissions needed for v2 (same as v1)
+
+---
+
+## Discovered: 2026-04-14 by Implementor (v2 Implementation)
+
+- **Finding:** MessageHandler constructor now has optional AgentService parameter (backward compatible). Test mocking via `vi.hoisted()` pattern is CRITICAL for ESM projects to avoid module-scope mocking errors.
+- **File:** src/handlers/message.handler.ts, tests/services/agent.service.spec.ts
+- **Impact:** Future Agent SDK integration tests MUST use `vi.hoisted()` pattern; direct `vi.fn()` at module level will fail in ESM.
+
+---
+
 ## Metadata
 
 - **Project:** bss-discord-bot (Discord bot for game feedback collection)
-- **Phase:** 0.5 (Knowledge) — COMPLETED
+- **Phase:** 4 (Implementor) — v2 feature implementation complete
 - **Date Created:** 2026-03-31
-- **Last Updated:** 2026-03-31
-- **Status:** Ready for Phase 4 (Implementor)
+- **Last Updated:** 2026-04-14
+- **Status:** v1 conventions verified and stable. v2 features implemented (19 TASKs). Ready for Phase 5 (Reviewer).
 - **Context Files:** conventions.md, architecture.md, knowledge.md (this file)
-- **Pipeline Artifacts:** requirements.md, codebase-map.md, plan.md, decisions.md
+- **Pipeline Artifacts Status:** v1 + v2 artifacts in .claude/pipeline/ (requirements.md, codebase-map.md, plan.md, decisions.md, changes.md).
