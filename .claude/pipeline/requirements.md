@@ -1,138 +1,255 @@
 <!-- Pipeline | Phase 1 | Clarifier -->
-<!-- Date: 2026-03-31 -->
+<!-- Date: 2026-04-14 -->
 <!-- Status: COMPLETED -->
 
-# Requirement Specification
+# Requirement Specification — v2 Feature Implementation
 
 ## What needs to be done
 
-Build a Discord bot (`apps/discord-bot`) that:
+Add four new v2 slash commands to the Discord bot for code-aware analysis and developer enablement. Each command opens a private thread (following the v1 pattern) where developers can request structured artifacts from Claude. The bot generates GitHub issues with appropriate labels and posts confirmation links back to the Discord thread.
 
-1. **Listens** in a designated Discord Forum channel for the `/issue` slash command.
-2. **Opens a private thread** in that Forum channel visible only to the invoking user and admins (other regular users cannot see it).
-3. **Conversationally collects** the user's game-related request via a multi-turn Claude-powered chat inside the thread. Scope filter: reject only requests that are completely unrelated to the game (see Scope section).
-4. **Summarizes** the collected request (via Claude API) and presents the summary to the user with a confirmation prompt ("Vytvoriť?").
-   - If user **confirms** → proceed to issue creation/attachment, then close the thread.
-   - If user **declines** → allow the user to refine or cancel entirely.
-5. **Semantically compares** the confirmed summary against ALL existing issues (open + closed) in the `Kazarr/BySwordandSeal` GitHub repository using Claude API embeddings or similarity.
-6. **Decides**:
-   - If a sufficiently similar issue already exists → **add a comment** to that existing issue linking it to the new user report (so downstream agents can see the relationship).
-   - If no similar issue exists → **create a new GitHub issue** with the collected information.
-7. **Closes the Discord thread** after the issue action is completed.
+The four new commands are:
 
-**Deployment model:** Standalone Node.js process (separate repo `Kazarr/bss-discord-bot`), deployed independently (e.g., VPS, Railway, Fly.io). Not part of the game monorepo.
+1. **`/analyze`** — Code-aware analysis of the BSS game codebase
+   - Opens thread → bot asks "What would you like to analyze?"
+   - Agent SDK spawns with tool access to BSS codebase (local clone)
+   - Produces code-aware analysis document
+   - GitHub artifact: Issue with label `analysis`
 
----
+2. **`/story`** — INVEST-style user story generation
+   - Opens thread → bot asks "What user story would you like to produce?"
+   - May read codebase for context (at Claude's discretion)
+   - Agent SDK may be spawned if code context needed
+   - Produces INVEST-compliant user story
+   - GitHub artifact: Issue with label `user-story`
+
+3. **`/research`** — Research and investigation notes
+   - Opens thread → bot asks "What would you like to research?"
+   - May read codebase for code references
+   - Agent SDK may be spawned if investigation requires codebase inspection
+   - Produces research/investigation notes (may include code references)
+   - GitHub artifact: Issue with label `research`
+
+4. **`/workbench`** — Free-form conversation with artifact proposal
+   - Opens thread → free-form NL conversation with Claude
+   - At end of conversation, bot may propose creating one or more artifacts
+   - Artifacts proposed: zero or more of `analysis`, `user-story`, `research` (based on conversation content)
+   - GitHub artifacts: One or more issues with appropriate labels (or none if conversation yields no artifact proposal)
 
 ## Change type
 
-New feature — standalone Node.js application in a new repository (`Kazarr/bss-discord-bot`), separate from the game monorepo.
-
----
+New feature (add four new slash commands with v2 artifact generation pipeline)
 
 ## Context and motivation
 
-The game project (`BySwordandSeal`) needs a structured feedback channel so that:
-- Players can report bugs, request features, and give UX feedback directly from Discord without needing a GitHub account.
-- Duplicate issues are automatically deduplicated (semantic matching) to keep the issue tracker clean.
-- Issues are linked/grouped for the downstream Claude Code agent pipeline so it can understand relationships between reported problems.
+**Why:** BSS Discord community needs structured, code-aware analysis and developer enablement tools. v1 (`/issue`) is feedback-focused; v2 extends the bot to support analysis, stories, and research workflows for team collaboration.
 
----
+**Who it affects:** Discord server admins (gated to admins only for v2)
+
+**Urgency:** Medium — v2 is a planned enhancement post-v1 deployment
 
 ## Scope
 
 ### Affected areas
 
-| Area | What changes |
-|------|-------------|
-| `Kazarr/bss-discord-bot` (new repo) | **New standalone application** — created from scratch in its own repository |
-| Game monorepo (`Kazarr/BySwordandSeal`) | **NOT affected** — no changes to existing game code |
-| `Kazarr/BySwordandSeal` GitHub Issues | Read + write via GitHub API (semantic matching, create/comment) |
+**Frontend (Discord side):**
+- `src/commands/` — four new command files: `analyze.ts`, `story.ts`, `research.ts`, `workbench.ts`
+- `src/commands/index.ts` — register four new commands in `deployCommands()`
+
+**Backend services (new or extended):**
+- `src/services/agent.service.ts` — NEW — spawn Agent SDK sessions for code-aware analysis
+- `src/services/claude.service.ts` — EXTEND — new methods for multi-artifact proposal logic in `/workbench`
+- `src/handlers/message.handler.ts` — EXTEND — add routing for four new command states
+- `src/types/index.ts` — EXTEND — new types for artifact metadata, workbench conversation state
+
+**GitHub integration:**
+- Existing `GitHubService` unchanged — same `createIssue()` method
+- New use: label artifacts with `analysis`, `user-story`, `research` (labels must exist or be created)
+
+**External dependencies:**
+- `@anthropic-ai/sdk` — EXTEND — add Agent SDK import if not already present
+- `@anthropic-ai/sdk` Agent SDK — NEW — tool definitions for codebase file listing, reading, grep
 
 ### Layers
 
-- **Standalone Node.js application** — TypeScript, own `package.json`, own CI/CD, independent deployment
-- **Discord integration** — discord.js v14+
-- **Claude API** — conversation management + semantic similarity
-- **GitHub API** — Octokit REST (read issues, create issues, add comments)
-- **No database** — bot is stateless; thread lifecycle managed by Discord
-- **No dependency on game monorepo** — bot does not import `@bss/shared` or any game code
-
-### In-scope request topics (game scope filter)
-
-All of the following are accepted:
-- Game mechanics (production, buildings, resources, population, economy)
-- Technical problems (login failures, page not loading, errors)
-- UI/UX feedback (visual issues, readability, layout problems)
-
-Out-of-scope (rejected by bot with polite message, thread closed):
-- Topics completely unrelated to the game (e.g., "recommend me a pizza recipe")
-
----
+- **Discord:** Slash command handlers (4 new commands)
+- **Claude:** Conversation orchestration + artifact generation (multi-turn, Agent SDK spawning)
+- **GitHub:** Issue creation with labels (existing mechanism, new labels)
+- **File System:** Agent SDK tool access to local BSS codebase clone (read-only, no writes)
 
 ## Acceptance criteria
 
-- [ ] `/issue` slash command is registered in the Discord server and responds in a designated Forum channel.
-- [ ] A private thread is created on `/issue`; only the invoking user and admins can see it.
-- [ ] Bot engages the user in a multi-turn conversation (powered by Claude API) to collect the issue details.
-- [ ] If the user's topic is clearly unrelated to the game, the bot politely declines and closes the thread.
-- [ ] After collection, bot presents a plain-text summary to the user and asks "Vytvoriť?" (or equivalent confirmation prompt).
-- [ ] If user confirms: bot performs semantic comparison against all issues (open + closed) in `Kazarr/BySwordandSeal`.
-- [ ] If a similar issue is found: bot adds a comment to that issue (not a new issue) and reports the issue URL back to the user in the thread.
-- [ ] If no similar issue is found: bot creates a new GitHub issue with title + body derived from the summary, and reports the new issue URL back to the user.
-- [ ] Thread is closed/archived after the action completes (both create and attach paths).
-- [ ] If user declines the summary: bot allows at least one refinement cycle or clean cancellation.
-- [ ] Bot reads BOTH open AND closed GitHub issues during semantic comparison.
-- [ ] Game monorepo (`Kazarr/BySwordandSeal`) is not modified.
-- [ ] No secrets (Discord token, Claude API key, GitHub token) are hardcoded — loaded from environment variables.
+All acceptance criteria are for v2 scope only. v1 `/issue` command behavior is unchanged.
 
----
+### Command Registration & Access
+
+- [ ] Four new slash commands (`/analyze`, `/story`, `/research`, `/workbench`) are registered and visible in Discord
+- [ ] All four commands are gated to server admins only (non-admin users see "insufficient permissions" error)
+- [ ] All four commands are visible only in the designated issue channel (same channel as v1 `/issue`)
+
+### Thread Creation & Conversation Flow
+
+- [ ] `/analyze`: Opens private thread → bot immediately asks "What would you like to analyze?" in Slovak → awaits user input
+- [ ] `/story`: Opens private thread → bot immediately asks "What user story would you like to produce?" in Slovak → awaits user input
+- [ ] `/research`: Opens private thread → bot immediately asks "What would you like to research?" in Slovak → awaits user input
+- [ ] `/workbench`: Opens private thread → bot greets user and invites free-form conversation in Slovak
+- [ ] All threads follow v1 naming convention: `Issue: {username} - {YYYY-MM-DD}`
+- [ ] All threads are private (type: `ChannelType.PrivateThread`)
+- [ ] All threads auto-archive after 60 minutes of inactivity
+
+### Agent SDK Integration
+
+- [ ] `/analyze` and `/research` spawn Agent SDK session with tool access to BSS codebase
+- [ ] `/story` and `/workbench` may optionally spawn Agent SDK session if context needed (Claude decides)
+- [ ] Agent SDK session is initialized with fresh git pull of `By-Sword-and-Seal-Playground` repo (kept current before each command)
+- [ ] Agent SDK tools available: file listing (`ls`), file reading (`read`), grep search
+- [ ] Agent SDK session is read-only — no file writes, no git operations, no modifications to codebase
+
+### Artifact Generation & GitHub Issues
+
+- [ ] **`/analyze`:** At end of conversation, bot generates code-aware analysis document and creates GitHub issue with label `analysis`
+- [ ] **`/story`:** At end of conversation, bot generates INVEST-style user story and creates GitHub issue with label `user-story`
+- [ ] **`/research`:** At end of conversation, bot generates research notes (may include code references) and creates GitHub issue with label `research`
+- [ ] **`/workbench`:** At end of free-form conversation, bot may propose zero or more artifacts. If proposed, creates corresponding GitHub issues with labels `analysis`, `user-story`, and/or `research`
+- [ ] All GitHub issues are created in `Kazarr/BySwordandSeal` repo (configurable via `GITHUB_OWNER` and `GITHUB_REPO` env vars, same as v1)
+- [ ] GitHub issue body includes:
+  - **Discord User:** {username}#{discriminator}
+  - **Reported:** {timestamp}
+  - {artifact content}
+  - **Thread:** {link to Discord thread}
+- [ ] All GitHub issue labels (`analysis`, `user-story`, `research`) exist in the target repo (or bot creates them if they don't)
+
+### Conversation & Artifact Workflow
+
+- [ ] **`/analyze`:** User describes what to analyze → Agent SDK reads codebase → Claude generates structured analysis → bot displays summary in thread → user confirms ("áno") or declines ("nie")
+- [ ] **`/story`:** User describes user story requirements → Agent SDK may read codebase for context → Claude generates INVEST story → bot displays summary in thread → user confirms or declines
+- [ ] **`/research`:** User describes research question → Agent SDK may read codebase → Claude produces investigation notes → bot displays summary → user confirms or declines
+- [ ] **`/workbench`:** User initiates free-form conversation with Claude → multi-turn dialogue → at conversation end, bot analyzes dialogue and proposes artifacts (if any) → user confirms ("áno") or cancels
+- [ ] User confirmation flow:
+  - If user confirms: create GitHub issue(s), post confirmation link in thread, close thread
+  - If user declines: ask "Improve?" or "Cancel?" → improve sends back to conversation, cancel closes thread
+- [ ] All bot responses are in Slovak (same system prompt pattern as v1)
+- [ ] All confirmation prompts are in Slovak ("Vytvoriť?" = "Create?")
+
+### Error Handling & Edge Cases
+
+- [ ] If Agent SDK session fails to initialize: bot sends error message in Slovak + closes thread gracefully
+- [ ] If code-aware analysis requires tools but codebase is unavailable: bot notifies user + offers to continue without code context (for `/story` and `/research`)
+- [ ] If GitHub issue creation fails: bot sends error message in thread, does NOT close thread (allow retry)
+- [ ] If no artifact is proposed by bot at end of `/workbench` conversation: bot notifies user "No artifacts proposed" and closes thread
+- [ ] If user is removed from server during conversation: thread orphans gracefully (auto-archive after 60 min)
+
+### Backward Compatibility & Non-Interference
+
+- [ ] v1 `/issue` command behavior is unchanged
+- [ ] v1 conversation state machine is unchanged
+- [ ] v1 GitHub integration is unchanged
+- [ ] v1 unit tests all pass without modification
+- [ ] v1 Discord intents and permissions remain sufficient (no new intents or permissions required beyond v1)
 
 ## Constraints — what NOT to do
 
-- **Do NOT** modify any files in the game monorepo (`Kazarr/BySwordandSeal`).
-- **Do NOT expose** Discord token, Claude API key, or GitHub personal access token in committed code.
-- **Do NOT** make the thread visible to regular Discord users — privacy is a hard requirement.
-- **Do NOT** skip the confirmation step — user must explicitly confirm before any GitHub write action.
-- **Do NOT** create a new GitHub issue if a semantically similar one already exists — attach a comment instead.
-- **Do NOT** reject game-related bug reports or UX feedback — only reject topics completely unrelated to the game.
-- **Do NOT** add runtime code browsing of the game codebase to the bot — it collects user feedback only.
-- **Do NOT** add a database dependency — bot must remain stateless for v1.
+- **MUST NOT change v1 `/issue` command** — `/issue` behavior, flow, and output are unchanged
+- **MUST NOT modify existing services** — v1 services (ClaudeService, GitHubService, ThreadService) are extended, not replaced
+- **MUST NOT store v2 conversation state in database** — v2 uses same in-memory Map pattern as v1 (state lost on restart, accepted limitation)
+- **MUST NOT require new Discord intents** — v2 uses same three intents as v1: Guilds, GuildMessages, MessageContent
+- **MUST NOT require new Discord permissions** — v2 uses same permissions as v1: SendMessages, CreatePrivateThreads, SendMessagesInThreads, ManageThreads, ReadMessageHistory
+- **MUST NOT write to the BSS codebase** — Agent SDK has read-only access; no modifications, no writes, no git operations
+- **MUST NOT create GitHub issues outside `Kazarr/BySwordandSeal` repo** — all v1 and v2 issues go to the same target repo
+- **MUST NOT modify existing GitHub labels** — labels `analysis`, `user-story`, `research` are created if they don't exist; existing labels remain untouched
+- **MUST NOT break existing tests** — all v1 tests must pass; new tests must follow v1 patterns
+- **MUST NOT add new environment variables** — v2 reuses v1 config: DISCORD_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID, ANTHROPIC_API_KEY, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, CLAUDE_MODEL, SIMILARITY_THRESHOLD
+- **MUST NOT enable permissions for non-admins** — v2 commands are admin-gated in v1
+- **MUST NOT use Forum channels** — v2 commands create private threads in text channels (same as v1)
+- **MUST NOT interact with v1 issue state machine** — v2 commands and v1 command are independent workflows; v2 does not modify v1 state entries
 
----
+## Existing patterns (from v1)
 
-## Existing patterns (carried over from game project)
+All v2 commands follow v1 patterns established in `.claude/context/`:
 
-| Convention | Value |
-|------------|-------|
-| TypeScript config | strict mode, ES2022 target |
-| Code style | Prettier single quotes |
-| Secret management | Environment variables only — never committed; `.env.example` pattern |
-| Module system | ES modules (ESM) |
+**Thread creation:**
+- v1 pattern: `ThreadService.createPrivateThread()` with naming `Issue: {username} - {YYYY-MM-DD}`, auto-archive 60 min, private type, invitable: false
+- v2 extends: Same pattern for all four commands
 
-Discord.js version, Octokit version, and Anthropic SDK version are not yet pinned — Scout phase will determine compatible versions.
+**Conversation flow:**
+- v1 pattern: Multi-turn message handling via `MessageHandler` state machine, in-memory `Map<threadId, ConversationState>`
+- v2 extends: Same state machine pattern; v2 commands add new state values (e.g., `v2-analyzing`, `v2-story-drafting`, `v2-workbench`)
 
----
+**Claude interaction:**
+- v1 pattern: Stateless calls to `ClaudeService` with conversation history passed in; system prompt specifies Slovak communication
+- v2 extends: Same pattern; new optional pattern for Agent SDK spawning when code context needed
+
+**GitHub integration:**
+- v1 pattern: `GitHubService.createIssue()` with body format including Discord user, timestamp, content, thread link
+- v2 extends: Same pattern; new parameter: `labels` array (e.g., `["analysis"]`, `["user-story"]`, `["research"]`)
+
+**Error handling:**
+- v1 pattern: Try/catch in handlers, log errors, send user-friendly message in thread
+- v2 extends: Same pattern for Agent SDK errors, GitHub errors, and conversation failures
+
+**TypeScript conventions:**
+- Types from `src/types/index.ts`
+- Services in `src/services/`, handlers in `src/handlers/`, commands in `src/commands/`
+- All ESM imports with `.js` extensions
+- PascalCase for classes, camelCase for methods, UPPER_SNAKE_CASE for constants
+- Bracket notation for env var access
 
 ## Risks and notes
 
-1. **Thread privacy on Discord** — Forum channels support private threads but this requires the `PRIVATE_THREADS` intent and the Manage Threads permission. Scout should verify discord.js v14 API support.
-2. **Semantic similarity threshold** — The threshold for "similar enough to attach vs. create new" is not defined. Planner must propose a strategy (cosine similarity cutoff, or Claude prompt-based classification).
-3. **GitHub rate limits** — Reading all open + closed issues at bot startup (or per request) may hit GitHub API rate limits for large repos. Scout should check current issue volume.
-4. **Claude API cost** — Multi-turn conversations + semantic comparison per `/issue` invocation incur API costs. No budget constraint was specified; Planner should note this.
-5. **Project scaffolding** — Standalone repo needs proper `package.json`, `tsconfig.json`, ESLint, Prettier setup. Scout should determine best project structure.
-6. **Test strategy** — Planner must define unit + integration test strategy for the bot (Vitest or Jest).
-7. **Statelessness assumption** — Bot does not persist conversation state to the database. If the bot restarts mid-conversation, the thread becomes orphaned. This is accepted for now (noted for future iteration).
+### Agent SDK Dependency
 
----
+**Risk:** Agent SDK is a new external dependency not yet integrated into project.
+
+**Mitigation:** Agent SDK must be added to package.json; all Agent SDK calls are mocked in unit tests (following v1 pattern of mocking external APIs).
+
+### Code-Aware Analysis Complexity
+
+**Risk:** Agent SDK spawning, tool definitions, and multi-tool interaction may add complexity and potential failure points.
+
+**Mitigation:** Start with `/analyze` as primary code-access command; `/story` and `/research` may use code context but are not required to; `/workbench` is free-form and artifact proposal is optional.
+
+### GitHub Label Management
+
+**Risk:** Labels `analysis`, `user-story`, `research` must exist in target repo.
+
+**Mitigation:** Bot can create labels if they don't exist (simple GitHub API call). Alternatively, labels must be pre-created in repo admin.
+
+### Rate Limiting & Token Cost
+
+**Risk:** Agent SDK sessions + prompt-based similarity may increase API token usage vs. v1.
+
+**Mitigation:** v1 rate limits are low volume; v2 monitor token usage in early deployment. Agent SDK sessions are spawned only when needed (not for every command).
+
+### Workbench Artifact Proposal Logic
+
+**Risk:** Logic to determine whether `/workbench` conversation yielded artifact-worthy content is subjective (Claude-based heuristic).
+
+**Mitigation:** Set clear guidance in system prompt: "Propose an artifact ONLY if conversation produced concrete, actionable output (analysis, story, or research notes). Do not propose artifacts for casual discussion."
+
+### Backward Compatibility
+
+**Risk:** Adding four new commands + new types + new service may introduce bugs affecting v1 command.
+
+**Mitigation:** All v1 code paths remain unchanged. New code is isolated to new command files and new service (`AgentService`). Existing service extensions are additive (new methods, not modified methods).
+
+### Unknown: Exact Artifact Proposal Heuristic for Workbench
+
+**Question for next phase:** What exact criteria should trigger artifact proposal in `/workbench`? (e.g., conversation word count, explicit user request, Claude confidence threshold)
+
+**Current assumption:** Claude uses judgment; clear system prompt guidance provided.
 
 ## Decisions made during specification
 
-| # | Question | Decision | Rationale |
-|---|----------|----------|-----------|
-| 1 | Where does the bot live? | Standalone repo `Kazarr/bss-discord-bot` | Bot has different runtime, deployment, and dependencies; doesn't need `@bss/shared` types — only collects text feedback |
-| 2 | What kind of Discord thread? | Discord Forum channel with private threads | Privacy requirement — only invoking user + admins see the thread |
-| 3 | Is there a confirmation step before GitHub write? | Yes — bot summarizes and asks "Vytvoriť?" | User must explicitly confirm before any GitHub write action |
-| 4 | What happens when a similar issue is found? | Auto-add comment to the matching existing issue | Downstream Claude Code agent needs linked issues for context |
-| 5 | How broad is the game scope filter? | Accept mechanics + technical + UI/UX; reject only fully off-topic | Players should be able to report bugs and UX problems, not just feature requests |
-| 6 | Which GitHub repo, which issues to read? | `Kazarr/BySwordandSeal`, both open AND closed issues | Full issue history gives better semantic matching coverage |
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| **v2 and v1 commands isolated?** | Yes — `/analyze`, `/story`, `/research`, `/workbench` are independent of v1 `/issue`. No interaction between workflows. | Simplifies implementation, reduces risk of breaking v1. Each command has its own state machine branch. |
+| **Agent SDK integration point?** | Spawned per-command when needed. `/analyze` always spawns. `/story`, `/research`, `/workbench` may spawn if Claude decides code context is valuable. | Balances code-awareness with simplicity. Not every command needs codebase access. |
+| **BSS codebase clone management?** | Bot maintains persistent local clone of `By-Sword-and-Seal-Playground`. Fresh `git pull` before each Agent SDK session. | Ensures Agent SDK always has current code. Simple polling/pull mechanism, no webhook needed for v1. |
+| **GitHub issue labels in v2?** | Three new labels: `analysis`, `user-story`, `research`. Same target repo as v1: `Kazarr/BySwordandSeal`. | Clear categorization of artifact types. Reuses v1 repo config. Backward compatible with v1 (v1 issues have no label or existing labels). |
+| **Admin-only gating?** | Yes — all v2 commands require admin role. v1 `/issue` remains open to all (unchanged). | Protects from spam/abuse on new experimental features. v1 feedback mechanism remains open. Can be loosened later if needed. |
+| **Backward compatibility approach?** | Strict: v1 code is untouched; v2 is additive only (new types, new service, new command files, new state machine branches). | Reduces risk of regression. v1 can be deployed independently of v2. v2 testing does not require v1 code changes. |
+| **State machine design for v2?** | Extend existing `ConversationPhase` enum with new phases: `v2-analyzing`, `v2-story-drafting`, `v2-research-investigating`, `v2-workbench`. Same `MessageHandler` used for routing. | Reuses proven state machine pattern. v1 tests unaffected. New states isolated in v2 branches. |
+| **Error recovery in v2?** | Same as v1: errors logged, user notified in thread, thread kept open for retry (except agent spawn failures, which close thread). | Consistent with v1 UX. Allows user to attempt recovery without re-invoking command. |
+| **Language requirement (v2)?** | All v2 commands use Slovak for bot responses (same system prompt pattern as v1). | Consistent user experience. Discord community language is Slovak. |
+| **Artifact confirmation flow?** | Same as v1: bot shows summary → user responds "áno" (yes) or "nie" (no) → if yes: create GitHub issue + close thread; if no: ask improve or cancel. | Familiar UX for users coming from v1. Ensures human review before artifact creation. |
+

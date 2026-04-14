@@ -3,9 +3,14 @@ import { Client, Events, GatewayIntentBits, Interaction } from 'discord.js';
 import { config } from './config.js';
 import { deployCommands } from './commands/index.js';
 import { handleIssueCommand } from './commands/issue.js';
+import { handleAnalyzeCommand } from './commands/analyze.js';
+import { handleStoryCommand } from './commands/story.js';
+import { handleResearchCommand } from './commands/research.js';
+import { handleWorkbenchCommand } from './commands/workbench.js';
 import { ClaudeService } from './services/claude.service.js';
 import { GitHubService } from './services/github.service.js';
 import { ThreadService } from './services/thread.service.js';
+import { AgentService } from './services/agent.service.js';
 import { MessageHandler } from './handlers/message.handler.js';
 
 const client = new Client({
@@ -19,6 +24,7 @@ const client = new Client({
 const claudeService = new ClaudeService();
 const githubService = new GitHubService();
 const threadService = new ThreadService();
+const agentService = new AgentService();
 const messageHandler = new MessageHandler(
   claudeService,
   githubService,
@@ -37,6 +43,34 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
   if (interaction.commandName === 'issue') {
     await handleIssueCommand(interaction, threadService, messageHandler);
+  } else if (interaction.commandName === 'analyze') {
+    await handleAnalyzeCommand(
+      interaction,
+      threadService,
+      messageHandler,
+      agentService
+    );
+  } else if (interaction.commandName === 'story') {
+    await handleStoryCommand(
+      interaction,
+      threadService,
+      messageHandler,
+      agentService
+    );
+  } else if (interaction.commandName === 'research') {
+    await handleResearchCommand(
+      interaction,
+      threadService,
+      messageHandler,
+      agentService
+    );
+  } else if (interaction.commandName === 'workbench') {
+    await handleWorkbenchCommand(
+      interaction,
+      threadService,
+      messageHandler,
+      agentService
+    );
   }
 });
 

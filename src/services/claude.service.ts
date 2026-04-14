@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config.js';
 import {
+  ArtifactProposal,
   ConversationMessage,
   GitHubIssue,
   SimilarityResult,
@@ -44,6 +45,74 @@ Determine if the following message is related to the game in ANY way:
 - Completely unrelated topics (recipes, weather, other games) → UNRELATED
 
 Respond with EXACTLY one word: "RELATED" or "UNRELATED"`;
+
+const CODE_ANALYSIS_SYSTEM_PROMPT = `You are a code-aware analysis assistant for the "By Sword and Seal" game codebase.
+Your task is to analyze game code and provide structured, technical analysis in English.
+
+Based on the user's analysis request and provided code context:
+- Identify key components, patterns, and relationships
+- Explain design decisions and implementation details
+- Suggest improvements or highlight potential issues
+- Use technical language appropriate for developers
+
+Format your analysis clearly with sections and bullet points.`;
+
+const USER_STORY_SYSTEM_PROMPT = `You are a user story generation assistant for game development.
+Your task is to create INVEST-compliant user stories in English.
+
+Guidelines for INVEST stories:
+- Independent: Can be implemented without dependencies on other stories
+- Negotiable: Details can be refined with the team
+- Valuable: Delivers clear user value
+- Estimable: Team can estimate effort
+- Small: Can be completed in one sprint
+- Testable: Acceptance criteria are clear and measurable
+
+Based on user requirements and optional code context, generate a complete user story with:
+- Title
+- As a... / I want to... / So that... description
+- Acceptance Criteria (testable conditions)
+- Notes (technical considerations, dependencies)`;
+
+const RESEARCH_SYSTEM_PROMPT = `You are a research and investigation assistant for game development.
+Your task is to produce research notes and investigation findings in English.
+
+Based on the user's research question and optional code context:
+- Gather and synthesize relevant information
+- Identify patterns, trends, or insights
+- Include code references when relevant
+- Provide recommendations based on findings
+- Structure findings clearly with sections and bullet points`;
+
+const WORKBENCH_SYSTEM_PROMPT = `Si asistent pre vývoj hier "By Sword and Seal". Komunikuj po slovensky.
+
+Tvoja úloha:
+- Viesť bezpečnú, priateľskú konverzáciu s vývojárom
+- Pomôcť s analýzou, návrhmi, testovaním, alebo inými vývojovými otázkami
+- Keď na konci konverzácie je konkrétny, akčný výstup (analýza, príbeh, výskum), signalizuj: [ARTIFACTS: {typy}]
+- Ak konverzácia smeruje k žiadnym konkrétnym artefaktom, napíš: [NO_ARTIFACTS]
+
+Príklady výstupov:
+- "Tu je analýza architektúry..." → ARTIFACTS: analysis
+- "Tu je návrh user story..." → ARTIFACTS: user-story
+- "Tu sú výskumné zistenia..." → ARTIFACTS: research
+- "Len nedelášeme všeobecný rozhovor." → NO_ARTIFACTS`;
+
+const ARTIFACT_PROPOSAL_SYSTEM_PROMPT = `Analyze the following conversation between a development assistant and a user.
+Determine if the conversation produced concrete, actionable artifacts worth creating as GitHub issues.
+
+Types of artifacts:
+- analysis: Code-aware analysis, architecture review, design pattern study
+- user-story: INVEST-compliant user story with acceptance criteria
+- research: Investigation findings, research notes, technical exploration
+
+Respond with EXACTLY:
+- "PROPOSE: analysis" (if analysis artifact was generated)
+- "PROPOSE: user-story" (if user story was generated)
+- "PROPOSE: research" (if research findings were generated)
+- "NO_ARTIFACTS" (if conversation was general discussion with no artifact output)
+
+You may respond with multiple PROPOSE lines if multiple artifacts are present in the conversation.`;
 
 export class ClaudeService {
   private client: Anthropic;
@@ -154,5 +223,129 @@ MATCH: none`;
     }
 
     return { matched: false };
+  }
+
+  async generateCodeAnalysis(
+    analysisPrompt: string,
+    codeContext: string
+  ): Promise<string> {
+    const prompt = `User's analysis request:
+${analysisPrompt}
+
+Code context:
+${codeContext}
+
+Please provide a comprehensive code-aware analysis.`;
+
+    const response = await this.client.messages.create({
+      model: config.anthropic.model,
+      max_tokens: 2048,
+      system: CODE_ANALYSIS_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const textBlock = response.content.find((block) => block.type === 'text');
+    return textBlock ? textBlock.text : '';
+  }
+
+  async generateUserStory(
+    requirements: string,
+    codeContext?: string
+  ): Promise<string> {
+    const prompt = codeContext
+      ? `User story requirements:
+${requirements}
+
+Code context (for reference):
+${codeContext}
+
+Generate an INVEST-compliant user story.`
+      : `User story requirements:
+${requirements}
+
+Generate an INVEST-compliant user story.`;
+
+    const response = await this.client.messages.create({
+      model: config.anthropic.model,
+      max_tokens: 2048,
+      system: USER_STORY_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const textBlock = response.content.find((block) => block.type === 'text');
+    return textBlock ? textBlock.text : '';
+  }
+
+  async generateResearch(
+    question: string,
+    codeContext?: string
+  ): Promise<string> {
+    const prompt = codeContext
+      ? `Research question:
+${question}
+
+Code context (for reference):
+${codeContext}
+
+Provide research and investigation notes.`
+      : `Research question:
+${question}
+
+Provide research and investigation notes.`;
+
+    const response = await this.client.messages.create({
+      model: config.anthropic.model,
+      max_tokens: 2048,
+      system: RESEARCH_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const textBlock = response.content.find((block) => block.type === 'text');
+    return textBlock ? textBlock.text : '';
+  }
+
+  async proposeArtifacts(
+    conversationMessages: ConversationMessage[]
+  ): Promise<ArtifactProposal[]> {
+    const conversationText = conversationMessages
+      .map((msg) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+      .join('\n');
+
+    const response = await this.client.messages.create({
+      model: config.anthropic.model,
+      max_tokens: 256,
+      system: ARTIFACT_PROPOSAL_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: conversationText }],
+    });
+
+    const textBlock = response.content.find((block) => block.type === 'text');
+    const result = textBlock ? textBlock.text : '';
+
+    const proposals: ArtifactProposal[] = [];
+    const lines = result.split('\n');
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      if (trimmedLine.startsWith('PROPOSE: analysis')) {
+        proposals.push({
+          type: 'analysis',
+          title: 'Code Analysis',
+          content: conversationText,
+        });
+      } else if (trimmedLine.startsWith('PROPOSE: user-story')) {
+        proposals.push({
+          type: 'user-story',
+          title: 'User Story',
+          content: conversationText,
+        });
+      } else if (trimmedLine.startsWith('PROPOSE: research')) {
+        proposals.push({
+          type: 'research',
+          title: 'Research Notes',
+          content: conversationText,
+        });
+      }
+    }
+
+    return proposals;
   }
 }

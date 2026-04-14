@@ -1,488 +1,884 @@
-<!-- Scout | 2026-03-31 | Codebase Map -->
-<!-- Project: bss-discord-bot (new standalone repo — Kazarr/bss-discord-bot) -->
-<!-- Task: Build a Discord bot that collects game feedback via Forum channel private threads, uses Claude API for conversation + semantic similarity, and creates/attaches GitHub issues -->
+<!-- Scout | 2026-04-14 | Codebase Map (v2 Scope) -->
+<!-- Project: bss-discord-bot -->
+<!-- Task: Map v1 architecture and identify v2 extensibility points for four new commands (/analyze, /story, /research, /workbench) with Agent SDK integration -->
 
-## Note: New Project — No Existing Codebase
+## Overview
 
-This is a **greenfield standalone project** in a new repository (`Kazarr/bss-discord-bot`). There is no existing codebase to map. Instead, this document covers:
-1. Technology research (discord.js, Anthropic SDK, Octokit)
-2. Reference patterns from the game monorepo
-3. Discord Forum channel + private thread feasibility
-4. GitHub issues volume analysis
-5. Proposed project structure and conventions
+This codebase map covers the existing v1 Discord bot implementation and identifies all extensibility points needed for v2 feature implementation. v1 is fully implemented with a single slash command (`/issue`) that manages feedback collection via private threads. v2 adds four new code-aware analysis commands with Agent SDK integration.
+
+**Key Property:** v1 and v2 are **isolated workflows**. v2 adds new command files, a new `AgentService`, and extends the message handler state machine, but does NOT modify any v1 code paths.
 
 ---
 
-## Technology Stack Research
+## Relevant Files
 
-### Core Dependencies (Pinned Versions)
-
-| Package | Version | Node.js Req | Purpose |
-|---------|---------|-------------|---------|
-| `discord.js` | 14.26.0 | >= 18 | Discord bot framework (slash commands, forum channels, threads) |
-| `@anthropic-ai/sdk` | 0.80.0 | (none specified) | Claude API client (multi-turn conversation, semantic comparison) |
-| `@octokit/rest` | 22.0.1 | >= 20 | GitHub REST API client (read/create issues, add comments) |
-| `dotenv` | 17.3.1 | — | Environment variable loading |
-| `typescript` | ~5.9.2 | — | Match game monorepo version for consistency |
-
-### Dev Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `vitest` | ^4.1.2 | Unit testing (match game monorepo's client-side test framework) |
-| `tsx` | ^4.21.0 | TypeScript execution for development (replaces ts-node, faster) |
-| `tsup` | ^8.5.1 | TypeScript bundler for production build |
-| `prettier` | ^2.6.2 | Code formatting (match game monorepo version) |
-| `eslint` | ^9.8.0 | Linting (match game monorepo version for consistency) |
-| `typescript-eslint` | ^8.40.0 | TypeScript ESLint integration |
-| `@types/node` | ^20.19.9 | Node.js type definitions (match game monorepo) |
-
-### discord.js 14 Key Dependencies (auto-installed)
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `@discordjs/builders` | ^1.14.0 | Slash command builders |
-| `@discordjs/rest` | ^2.6.1 | REST API for command registration |
-| `@discordjs/ws` | ^1.2.3 | WebSocket connection |
-| `discord-api-types` | ^0.38.40 | Discord API type definitions |
+| # | File | Lines | Current State | v2 Target |
+|---|------|-------|---------------|-----------|
+| 1 | `src/index.ts` | 65 | Entry point, event wiring | Add v2 command routing (line 38-40) |
+| 2 | `src/config.ts` | 60 | Env var loading + validation | No change (reuses existing config) |
+| 3 | `src/types/index.ts` | 57 | ConversationPhase, ConversationState | Extend: add v2 phases, optional `commandType` field |
+| 4 | `src/commands/index.ts` | 25 | Command registration | Register four new v2 commands here |
+| 5 | `src/commands/issue.ts` | 80 | `/issue` command handler | Unchanged (v1 isolated) |
+| 6 | `src/services/claude.service.ts` | 158 | Chat, summarize, similarity, scope filter | Extend: add methods for artifact generation |
+| 7 | `src/services/github.service.ts` | 96 | Issue CRUD, caching, pagination | No change (createIssue already supports labels) |
+| 8 | `src/services/thread.service.ts` | 40 | Thread lifecycle | No change (reused by v2) |
+| 9 | `src/handlers/message.handler.ts` | 217 | State machine router | Extend: add v2 phase handlers (preserves v1 paths) |
+| 10 | `src/services/agent.service.ts` | TBD (NEW) | — | NEW: Spawn Agent SDK sessions for code analysis |
+| 11 | `src/commands/analyze.ts` | TBD (NEW) | — | NEW: `/analyze` command handler |
+| 12 | `src/commands/story.ts` | TBD (NEW) | — | NEW: `/story` command handler |
+| 13 | `src/commands/research.ts` | TBD (NEW) | — | NEW: `/research` command handler |
+| 14 | `src/commands/workbench.ts` | TBD (NEW) | — | NEW: `/workbench` command handler |
+| 15 | `tests/services/agent.service.spec.ts` | TBD (NEW) | — | NEW: Tests for AgentService (mocked SDK) |
+| 16 | `tests/commands/*.spec.ts` | TBD (NEW) | — | NEW: Tests for v2 command handlers |
 
 ---
 
-## Discord Forum Channel + Private Thread Research
+## Current Architecture (v1)
 
-### CRITICAL FINDING: Forum Channels Do NOT Support Private Threads
+### Entry Point: `src/index.ts`
 
-Discord Forum channels (channel type 15 / `GuildForum`) have a fundamental limitation:
+**Responsibilities:**
+- Load environment via `dotenv/config` import (line 1)
+- Create Discord client with three required intents
+- Initialize three services (Claude, GitHub, Thread)
+- Initialize message handler with services
+- Wire event handlers: `ClientReady`, `InteractionCreate`, `MessageCreate`
+- Handle graceful shutdown on SIGINT/SIGTERM
 
-**Forum threads are ALWAYS public within the channel.** Discord's Forum channel type only supports `PublicThread` (type 11). The `PrivateThread` type (type 12) is only available in **regular text channels**, not in Forum channels.
-
-Discord thread types:
-- `PublicThread` (11) — available in text channels AND forum channels
-- `PrivateThread` (12) — available ONLY in text channels
-- `AnnouncementThread` (13) — available in announcement channels
-
-**Source:** Discord API documentation, `discord-api-types` ChannelType enum. Forum channels use `startThread()` which creates public forum posts, not private threads.
-
-### Alternative Approaches (for Planner to decide)
-
-| Approach | Privacy | UX | Complexity |
-|----------|---------|-----|-----------|
-| **A: Private thread in a regular text channel** | Full privacy (only invoker + admins) | No forum-like organization, threads in a text channel | Low — discord.js fully supports `ThreadChannel.create({ type: ChannelType.PrivateThread })` on text channels |
-| **B: Forum post (public) + DM for sensitive info** | Partial (forum post visible to all, DM private) | Split conversation, confusing | Medium |
-| **C: Ephemeral replies + DM-based conversation** | Full privacy (DM only) | No server context, may feel disconnected | Medium |
-| **D: Forum post (public) accepting visibility** | No privacy | Best UX (forum organization, tags, search) | Lowest |
-| **E: Dedicated private text channel per user** | Full privacy | Creates channel clutter | High |
-
-**Recommendation for Planner:** Approach A (private thread in a regular text channel) is the closest to the requirements. The `/issue` command would be used in a designated text channel, and the bot creates a private thread there. This gives:
-- Full privacy (only invoker + users with `MANAGE_THREADS` permission see it)
-- Multi-turn conversation in the thread
-- Thread auto-archiving after completion
-- No channel clutter (threads collapse)
-
-### Discord.js Required Intents
-
-| Intent | Reason | Privileged? |
-|--------|--------|-------------|
-| `Guilds` | Access guild/channel structure | No |
-| `GuildMessages` | Receive messages in threads | No |
-| `MessageContent` | Read message content in threads | **Yes** (must enable in Developer Portal) |
-
-**Note:** `MessageContent` is a **privileged intent** that must be explicitly enabled in the Discord Developer Portal under Bot settings. Without it, the bot cannot read user messages in threads.
-
-### Discord Bot Permissions Required
-
-| Permission | Bit | Reason |
-|------------|-----|--------|
-| `SendMessages` | 0x800 | Send messages in channels/threads |
-| `CreatePrivateThreads` | 0x4000000000 | Create private threads |
-| `SendMessagesInThreads` | 0x4000000000 | Send messages inside threads |
-| `ManageThreads` | 0x400000000 | Archive/close threads, manage thread settings |
-| `ReadMessageHistory` | 0x10000 | Read conversation history in threads |
-| `UseApplicationCommands` | — | Implicit for slash commands |
-
-### Slash Command Registration
-
-discord.js 14 uses `SlashCommandBuilder` from `@discordjs/builders`:
+**Extension Point (for v2):**
 ```typescript
-new SlashCommandBuilder()
-  .setName('issue')
-  .setDescription('Report a game issue, bug, or feature request')
+// Line 38-40: InteractionCreate handler
+if (interaction.commandName === 'issue') {
+  await handleIssueCommand(interaction, threadService, messageHandler);
+}
+// v2 will add: } else if (interaction.commandName === 'analyze') { ... }
 ```
 
-Commands are registered via `REST.put(Routes.applicationGuildCommands(...))` for guild-specific commands (recommended for development) or `Routes.applicationCommands(...)` for global commands.
+### Configuration: `src/config.ts`
 
-### Thread Lifecycle in discord.js 14
-
+**Public API:**
 ```typescript
-// Create private thread in a text channel
-const thread = await channel.threads.create({
-  name: `Issue: ${user.username}`,
-  type: ChannelType.PrivateThread,
-  autoArchiveDuration: 60, // minutes
-  invitable: false, // prevent others from joining
-});
-
-// Add the invoking user
-await thread.members.add(user.id);
-
-// Send messages
-await thread.send('Describe your issue...');
-
-// Close/archive when done
-await thread.setArchived(true);
-await thread.setLocked(true);
+interface BotConfig {
+  discord: { token, guildId, channelId };
+  anthropic: { apiKey, model };
+  github: { token, owner, repo };
+  similarityThreshold: string; // e.g., "0.7"
+}
+const config: BotConfig; // exported singleton
 ```
 
----
+**Behavior:**
+- Validates all required env vars at startup (fail-fast pattern)
+- Returns typed config object
+- Supports optional vars: `CLAUDE_MODEL`, `SIMILARITY_THRESHOLD`
+- Throws descriptive error if required var missing
 
-## Anthropic SDK Research
+**v2 Usage:** Reuses as-is. No new env vars required per requirements.
 
-### Multi-Turn Conversation
+### Type System: `src/types/index.ts`
 
-The `@anthropic-ai/sdk` supports multi-turn conversations via the Messages API:
-
+**Current types:**
 ```typescript
-import Anthropic from '@anthropic-ai/sdk';
+type ConversationPhase = 'collecting' | 'summarizing' | 'confirming' | 'done';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+interface ConversationState {
+  threadId: string;
+  userId: string;
+  messages: ConversationMessage[];
+  phase: ConversationPhase;
+  summary?: string;
+}
 
-const response = await client.messages.create({
-  model: 'claude-sonnet-4-20250514',
-  max_tokens: 1024,
-  system: 'You are a game feedback collector...',
-  messages: [
-    { role: 'user', content: 'I found a bug...' },
-    { role: 'assistant', content: 'Can you describe...' },
-    { role: 'user', content: 'When I click...' },
-  ],
-});
+interface IssueData { title, body, labels? }
+interface GitHubIssue { number, title, body, state, url }
+interface SimilarityResult { matched, issue?, confidence? }
 ```
 
-The bot must maintain conversation history per thread (in-memory Map keyed by thread ID). On bot restart, orphaned threads lose their conversation context (accepted limitation per requirements).
+**v2 Extension Required:**
+- Add new phases to `ConversationPhase`: `'v2-analyzing'`, `'v2-story-drafting'`, `'v2-research-investigating'`, `'v2-workbench'`
+- Optional: Add `commandType?: 'issue' | 'analyze' | 'story' | 'research' | 'workbench'` to `ConversationState` for routing context
+- New type: `ArtifactProposal { type: 'analysis' | 'user-story' | 'research'; content: string }`
 
-### Semantic Similarity Strategy
+### Services Layer
 
-The Anthropic SDK does **NOT** provide a dedicated embeddings/similarity API. Two approaches for semantic comparison:
+#### ClaudeService: `src/services/claude.service.ts`
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **A: Claude prompt-based classification** — Send the summary + all existing issue titles/bodies to Claude and ask "which issue is most similar, if any?" | Simple, leverages Claude's understanding, no vector DB needed | Higher token cost per comparison (must send all issues), latency |
-| **B: Text embeddings via separate service** — Use a dedicated embeddings API (e.g., Voyage AI, OpenAI) + cosine similarity | More precise similarity scores, lower per-comparison cost at scale | Extra dependency, extra API key, vector storage complexity |
-
-**Recommendation for Planner:** Approach A (prompt-based) is best for v1 given:
-- No database requirement (stateless)
-- Small issue volume (currently 0 issues, expected <100 in near term)
-- Simplicity — single API dependency
-- Claude can reason about semantic meaning, not just keyword overlap
-
-The prompt would include all issue titles + short descriptions and ask Claude to identify the most similar one (or "none" if no match).
-
----
-
-## GitHub API Research (Octokit)
-
-### Issue Operations Needed
-
+**Current Public API:**
 ```typescript
-import { Octokit } from '@octokit/rest';
-
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-
-// Read all issues (open + closed)
-const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
-  owner: 'Kazarr',
-  repo: 'BySwordandSeal',  // NOTE: repo may not exist yet — see CRITICAL FINDING below
-  state: 'all',
-  per_page: 100,
-});
-
-// Create new issue
-await octokit.rest.issues.create({
-  owner: 'Kazarr',
-  repo: 'BySwordandSeal',
-  title: 'Bug: ...',
-  body: '...',
-});
-
-// Add comment to existing issue
-await octokit.rest.issues.createComment({
-  owner: 'Kazarr',
-  repo: 'BySwordandSeal',
-  issue_number: 42,
-  body: 'Related report from Discord user...',
-});
+class ClaudeService {
+  async chat(messages: ConversationMessage[], userMessage: string): Promise<string>;
+  async summarize(messages: ConversationMessage[]): Promise<string>;
+  async isGameRelated(message: string): Promise<boolean>;
+  async findSimilarIssue(summary: string, issues: GitHubIssue[]): Promise<SimilarityResult>;
+}
 ```
 
-### Rate Limits
+**System Prompts (defined inline):**
+- `CONVERSATION_SYSTEM_PROMPT` (line 9-20): Slovak feedback collector, game-scoped
+- `SUMMARIZE_SYSTEM_PROMPT` (line 22-36): GitHub issue format, English output
+- `SCOPE_FILTER_SYSTEM_PROMPT` (line 38-46): Binary classifier (RELATED/UNRELATED)
 
-| Auth Method | Rate Limit | Notes |
-|-------------|-----------|-------|
-| Personal Access Token | 5,000 requests/hour | Sufficient for this use case |
-| No auth | 60 requests/hour | Insufficient |
+**Implementation Details:**
+- Uses `@anthropic-ai/sdk` v0.80.0 (Messages API v1)
+- Stateless: conversation history passed in per call
+- Max tokens: 1024 per response
+- Model configurable via `config.anthropic.model`
 
-With 0 current issues and expected low volume (<100 issues), rate limits are not a concern. The bot should cache the issue list to minimize API calls (refresh on each `/issue` invocation or every N minutes).
+**v2 Extension Required:**
+- Add methods for artifact generation:
+  - `generateCodeAnalysis(analysisPrompt: string, codeContext: string): Promise<string>`
+  - `generateUserStory(requirements: string, codeContext?: string): Promise<string>`
+  - `generateResearch(question: string, codeContext?: string): Promise<string>`
+  - `proposeArtifacts(conversationHistory: ConversationMessage[]): Promise<ArtifactProposal[]>`
+- These reuse existing `messages.create()` with new system prompts
 
-### CRITICAL FINDING: Target Repository Name Mismatch
+#### GitHubService: `src/services/github.service.ts`
 
-- **Requirements state:** `Kazarr/BySwordandSeal`
-- **Actual repository:** `Kazarr/By-Sword-and-Seal-Playground`
-- The repo `Kazarr/BySwordandSeal` does **NOT exist** on GitHub
+**Current Public API:**
+```typescript
+class GitHubService {
+  async fetchAllIssues(): Promise<GitHubIssue[]>;
+  async createIssue(data: IssueData): Promise<GitHubIssue>; // supports labels
+  async addComment(issueNumber: number, body: string): Promise<void>;
+  async refreshCache(): Promise<void>;
+}
+```
 
-The requirements document references a repository that doesn't exist. The Planner should:
-1. Use `Kazarr/By-Sword-and-Seal-Playground` (the actual repo), OR
-2. The user plans to create `Kazarr/BySwordandSeal` as a separate repo, OR
-3. Make the target repo configurable via environment variable (recommended)
+**Cache Strategy:**
+- 15-minute TTL with timestamp tracking
+- Cache invalidated after `createIssue()` to ensure fresh state
+- `refreshCache()` allows explicit invalidation
 
-**Recommendation:** Make the GitHub owner and repo configurable via `GITHUB_OWNER` and `GITHUB_REPO` environment variables so the bot works regardless of which repo is targeted.
+**Error Handling:**
+- 404: Repository not found
+- 403: Rate limit or insufficient permissions
+- Network errors propagated
 
-### GitHub Issues Volume
+**v2 Usage:** No changes needed. `createIssue(data: IssueData)` already accepts `data.labels` array, which v2 will use for `["analysis"]`, `["user-story"]`, `["research"]`.
 
-- **Current issue count:** 0 (zero) issues in `Kazarr/By-Sword-and-Seal-Playground`
-- **PRs count:** 14 (merged pull requests exist, but PRs are not issues for our purpose)
-- **Impact:** Semantic comparison will be trivially fast initially. The bot should handle scaling to hundreds of issues gracefully (pagination, caching).
+#### ThreadService: `src/services/thread.service.ts`
+
+**Current Public API:**
+```typescript
+class ThreadService {
+  async createPrivateThread(channel: TextChannel, user: User, name: string): Promise<ThreadChannel>;
+  async sendMessage(thread: ThreadChannel, content: string): Promise<Message>;
+  async closeThread(thread: ThreadChannel): Promise<void>;
+}
+```
+
+**Thread Configuration:**
+- Type: `ChannelType.PrivateThread` (not Forum channel — Forums only support public threads)
+- Auto-archive: 60 minutes of inactivity
+- Invitable: `false` (prevents others from joining)
+- Naming: `Issue: {username} - {YYYY-MM-DD}` (v1 pattern)
+
+**v2 Usage:** Same pattern for all four new commands. No service changes needed.
+
+### Handler: `src/handlers/message.handler.ts`
+
+**Responsibilities:**
+- Maintain `Map<threadId, ConversationState>` for active conversations
+- Route messages by phase (collecting, confirming)
+- Transition phases: collecting → summarizing → confirming → creating → done
+- Call services and update state
+
+**State Machine (v1):**
+```
+START: /issue command invoked
+  ↓
+[collecting] ← User messages → ClaudeService.chat()
+  ↓ (when Claude sends "[READY_TO_SUMMARIZE]")
+[summarizing] → ClaudeService.summarize()
+  ↓
+[confirming] ← User responds "áno"/"nie"
+  ↓
+  "áno" → GitHubService.createIssue() or addComment()
+           ThreadService.closeThread()
+           → [done]
+  "nie" → Ask "improve or cancel?" → [collecting] (loop) or [done]
+```
+
+**Public API:**
+```typescript
+class MessageHandler {
+  constructor(claudeService, githubService, threadService);
+  initConversation(threadId: string, userId: string): void;
+  getConversation(threadId: string): ConversationState | undefined;
+  async handleMessage(message: Message): Promise<void>;
+}
+```
+
+**v2 Extension Required:**
+- Add new phase handlers for v2 phases: `handleV2Analyzing`, `handleV2StoryDrafting`, `handleV2Workbench`
+- Route logic (line 51-57 switch statement) adds new cases
+- v1 phases preserved exactly; v2 phases isolated in separate branches
+- Optional: Add `commandType` field to state to determine handler route
+
+**Critical Detail:** State entries are initialized by command handlers (not message handler). v1 `/issue` initializes with phase `'collecting'`. v2 commands initialize with appropriate v2 phases (e.g., `'v2-analyzing'`, `'v2-story-drafting'`).
+
+### Commands Layer
+
+#### Command Registration: `src/commands/index.ts`
+
+**Responsibility:** Deploy all commands to Discord API on bot ready
+
+**Current Implementation:**
+```typescript
+async function deployCommands(): Promise<void> {
+  const commands = [issueCommand.toJSON()];
+  // ... REST.put() to Discord
+}
+```
+
+**v2 Extension Required:**
+- Import four new command builders: `analyzeCommand`, `storyCommand`, `researchCommand`, `workbenchCommand`
+- Add to `commands` array before `rest.put()`
+- v1 command remains unchanged
+
+#### `/issue` Command: `src/commands/issue.ts`
+
+**Responsibilities:**
+1. Validate channel is designated issue channel
+2. Validate channel type is GuildText
+3. Create private thread via `ThreadService.createPrivateThread()`
+4. Initialize conversation state via `MessageHandler.initConversation()` with phase `'collecting'`
+5. Send welcome message (Slovak) to thread
+6. Reply to interaction with ephemeral confirmation
+
+**Key Detail:** Command handler is **decoupled** from message routing. It only:
+- Creates thread
+- Initializes state
+- Sends welcome message
+
+Message handler takes over from the message event (line 43-52 in index.ts).
+
+**v2 Pattern:** All four v2 commands will follow this same pattern:
+1. Check channel
+2. Check admin permissions (NEW for v2)
+3. Create thread
+4. Initialize state with v2 phase and command type
+5. Send welcome message (different per command)
 
 ---
 
-## Reference Patterns from Game Monorepo
+## Dependencies Between Files
 
-### TypeScript Configuration (to carry over)
-
-From `tsconfig.base.json`:
-| Setting | Value | Carry Over? |
-|---------|-------|-------------|
-| `strict` | true | Yes |
-| `target` | ES2022 | Yes |
-| `module` | nodenext | Yes |
-| `moduleResolution` | nodenext | Yes |
-| `isolatedModules` | true | Yes |
-| `noImplicitReturns` | true | Yes |
-| `noUnusedLocals` | true | Yes |
-| `noFallthroughCasesInSwitch` | true | Yes |
-| `skipLibCheck` | true | Yes |
-| `lib` | ["es2022"] | Yes |
-| `composite` | true | No (not needed for standalone) |
-| `declarationMap` | true | No (not a library) |
-| `emitDeclarationOnly` | true | No (need JS output) |
-| `customConditions` | ["@bss/source"] | No (monorepo-specific) |
-
-### Code Style (to carry over)
-
-| Convention | Value | Source |
-|------------|-------|--------|
-| Quotes | Single quotes | `.prettierrc: { "singleQuote": true }` |
-| Semicolons | Required | Prettier default |
-| Indentation | 2 spaces | Convention from monorepo |
-| Import style | ES6 named imports | `import { X } from 'y'` pattern |
-| Error handling | Typed exceptions, try/catch | NestJS pattern simplified for bot |
-| Secrets | Environment variables only | `.env.example` pattern |
-| Module system | ESM (`"type": "module"` in package.json) | nodenext resolution |
-
-### NestJS Module Pattern (reference, not used directly)
-
-The game server organizes code into modules with controller/service/module files:
-```
-auth/
-  auth.module.ts      — Module registration
-  auth.controller.ts  — HTTP endpoints
-  auth.service.ts     — Business logic
-  jwt.strategy.ts     — Passport strategy
-  jwt-auth.guard.ts   — Route guard
-  *.spec.ts           — Co-located tests
-```
-
-The Discord bot won't use NestJS (too heavy for a single-purpose bot), but the organizational pattern of separating concerns into service files is worth following.
-
-### Node.js Version
-
-- **Current local Node.js:** v24.7.0
-- **discord.js requirement:** >= 18
-- **Octokit requirement:** >= 20
-- **Recommendation:** Target Node.js >= 20 (LTS). Pin in `.nvmrc` or `engines` field.
-
----
-
-## Proposed Project Structure
+### Import Chain: Entry Point → Services
 
 ```
-bss-discord-bot/
-├── src/
-│   ├── index.ts                  # Entry point — bot startup, login
-│   ├── config.ts                 # Environment variable loading and validation
-│   ├── commands/
-│   │   ├── index.ts              # Command registration (deploy commands to Discord API)
-│   │   └── issue.ts              # /issue slash command handler
-│   ├── services/
-│   │   ├── claude.service.ts     # Anthropic API wrapper (conversation, summarization, similarity)
-│   │   ├── github.service.ts     # Octokit wrapper (read issues, create issue, add comment)
-│   │   └── thread.service.ts     # Thread lifecycle management (create, message, archive)
-│   ├── handlers/
-│   │   └── message.handler.ts    # Message handler for thread conversations
-│   └── types/
-│       └── index.ts              # TypeScript interfaces (ConversationState, IssueData, etc.)
-├── tests/
-│   ├── services/
-│   │   ├── claude.service.spec.ts
-│   │   ├── github.service.spec.ts
-│   │   └── thread.service.spec.ts
-│   ├── commands/
-│   │   └── issue.spec.ts
-│   └── handlers/
-│       └── message.handler.spec.ts
-├── .env.example                  # Template for required environment variables
-├── .gitignore
-├── .prettierrc                   # { "singleQuote": true }
-├── eslint.config.mjs             # Flat ESLint config
-├── tsconfig.json                 # TypeScript configuration
-├── vitest.config.ts              # Vitest configuration
-├── package.json
-└── tsup.config.ts                # Build configuration (optional, tsx for dev)
+src/index.ts
+  ├── config.js (loaded first via dotenv/config)
+  ├── commands/index.js → deployCommands()
+  ├── commands/issue.js → handleIssueCommand()
+  ├── services/claude.service.js → ClaudeService
+  ├── services/github.service.js → GitHubService
+  ├── services/thread.service.js → ThreadService
+  └── handlers/message.handler.js → MessageHandler
+       ├── depends: ClaudeService
+       ├── depends: GitHubService
+       └── depends: ThreadService
 ```
 
-### Environment Variables (.env.example)
+### Type Dependencies
 
 ```
-# Discord
-DISCORD_TOKEN=your-discord-bot-token
-DISCORD_GUILD_ID=your-discord-server-id
-DISCORD_CHANNEL_ID=channel-id-for-issue-threads
+src/types/index.ts
+  ├── BotConfig (imported by: config.ts)
+  ├── ConversationMessage (imported by: claude.service.ts, handlers/message.handler.ts)
+  ├── ConversationPhase (imported by: handlers/message.handler.ts, types exported)
+  ├── ConversationState (imported by: handlers/message.handler.ts)
+  ├── IssueData (imported by: github.service.ts, handlers/message.handler.ts)
+  ├── GitHubIssue (imported by: github.service.ts, claude.service.ts, handlers/message.handler.ts)
+  └── SimilarityResult (imported by: claude.service.ts)
+```
 
-# Anthropic (Claude API)
-ANTHROPIC_API_KEY=your-anthropic-api-key
-CLAUDE_MODEL=claude-sonnet-4-20250514
+### Service Dependencies
 
-# GitHub
-GITHUB_TOKEN=your-github-personal-access-token
-GITHUB_OWNER=Kazarr
-GITHUB_REPO=BySwordandSeal
+```
+ClaudeService (uses: config, types)
+  └── Anthropic SDK
 
-# Bot Configuration
-SIMILARITY_THRESHOLD=0.7
+GitHubService (uses: config, types)
+  └── Octokit (GitHub REST API)
+
+ThreadService (uses: discord.js types)
+  └── discord.js
 ```
 
 ---
 
-## Relevant Files from Game Monorepo (Reference Only)
+## Shared Code (Risk Assessment)
 
-These files are NOT modified — they serve as reference patterns for the Planner.
+### High-Value Reusable Components
 
-| # | File | Lines | Description | Relevance |
-|---|------|-------|-------------|-----------|
-| 1 | `tsconfig.base.json` | 21 | Base TypeScript config | Carry over strict mode, ES2022, nodenext settings |
-| 2 | `.prettierrc` | 3 | Prettier config | Carry over `{ "singleQuote": true }` |
-| 3 | `package.json` | 95 | Root package.json | Reference for Node.js version, TypeScript version |
-| 4 | `apps/server/src/main.ts` | 43 | Server entry point | Reference for environment-based config pattern |
-| 5 | `apps/server/src/app/auth/auth.module.ts` | 21 | NestJS module pattern | Reference for modular code organization |
-| 6 | `apps/server/src/app/auth/auth.service.ts` | ~150 | Service pattern | Reference for service class structure |
-| 7 | `apps/server/.env.example` | 2 | Env example | Reference for `.env.example` pattern |
-| 8 | `apps/server/jest.config.js` | 41 | Jest config | Reference for test configuration (but bot uses Vitest) |
+| Component | Current Consumers | Risk | v2 Impact |
+|-----------|-------------------|------|-----------|
+| `ThreadService.createPrivateThread()` | 1 (v1 /issue) | LOW | v2 reuses for all 4 commands — stable API |
+| `ClaudeService.chat()` | 1 (message handler) | LOW | v2 reuses for multi-turn conv — no change needed |
+| `ClaudeService.summarize()` | 1 (message handler) | LOW | v2 extends with new artifact generation methods |
+| `GitHubService.createIssue()` | 1 (message handler) | LOW | v2 reuses with labels param (already supported) |
+| `MessageHandler` state machine | 1 (index.ts routing) | MEDIUM | v2 extends: add new phases + routes. Existing v1 phases preserved. |
+| `config` object | All services | LOW | No changes for v2. Reuses existing env vars. |
+
+### New Components for v2 (No Conflicts)
+
+| Component | Purpose | Isolation |
+|-----------|---------|-----------|
+| `AgentService` (NEW) | Spawn Claude Agent SDK sessions with file/grep tools | Isolated: only v2 commands use it |
+| v2 command handlers (NEW) | `/analyze`, `/story`, `/research`, `/workbench` | Isolated: new files, no v1 interference |
+| v2 state machine branches | New ConversationPhase values | Isolated: separate switch cases in message handler |
 
 ---
 
-## Existing Conventions (to carry over to new project)
+## Existing Conventions (v1)
 
-Verified from 5+ files in the game monorepo:
+### Naming Conventions
 
-1. **Single quotes** — enforced by `.prettierrc` (`{ "singleQuote": true }`)
-2. **ES module imports** — `import { X } from 'package'` style, no CommonJS
-3. **PascalCase for classes** — `AuthService`, `GameEngineService`
-4. **camelCase for functions/methods** — `getProvince()`, `constructBuilding()`
-5. **UPPER_SNAKE_CASE for constants** — `ECONOMY_TICK_INTERVAL_MS`
-6. **kebab-case for file names** — `auth.service.ts`, `game-engine.service.ts`
-7. **Co-located tests** — `*.spec.ts` alongside source files
-8. **Secrets via env vars** — `process.env['KEY']` with bracket notation (not dot notation)
-9. **Private readonly for injected deps** — `private readonly prisma: PrismaService`
-10. **dotenv loaded at entry point** — `import 'dotenv/config'` at top of main.ts
-11. **Strict TypeScript** — all strict checks enabled
+| Category | Pattern | Examples |
+|----------|---------|----------|
+| **Classes/Services** | PascalCase | `ClaudeService`, `GitHubService`, `ThreadService` |
+| **Methods** | camelCase | `createPrivateThread()`, `findSimilarIssue()`, `handleMessage()` |
+| **Constants** | UPPER_SNAKE_CASE | `AUTO_ARCHIVE_DURATION_MIN`, `CACHE_TTL_MS`, `READY_TO_SUMMARIZE` |
+| **Files** | kebab-case | `claude.service.ts`, `message.handler.ts`, `issue.ts` |
+| **Test files** | `*.spec.ts` | `claude.service.spec.ts`, `config.spec.ts` |
+| **Interfaces** | PascalCase | `ConversationState`, `GitHubIssue`, `BotConfig` |
+
+### Import Style
+
+- **Order:** Node.js builtins → third-party packages → local modules (relative with `.js` extension)
+- **Form:** Named imports only (`import { X, Y } from 'pkg'`)
+- **Env var access:** Bracket notation: `process.env['KEY']` (NOT dot notation)
+- **dotenv:** Imported only in `index.ts` as `import 'dotenv/config'` (before other imports)
+
+### Code Style
+
+| Aspect | Standard |
+|--------|----------|
+| **Quotes** | Single quotes (`'`) |
+| **Semicolons** | Required |
+| **Indentation** | 2 spaces |
+| **Error handling** | try/catch with descriptive messages |
+| **Async** | async/await (never callbacks) |
+
+### State Machine Pattern
+
+**Pattern identified in v1:**
+- Phases represented as enum/union type: `'collecting' | 'summarizing' | 'confirming' | 'done'`
+- State stored per-thread in `Map<threadId, ConversationState>`
+- Handlers organized by phase (separate methods)
+- Initialization by command handler, routing by message handler
+- Cleanup: state entry deleted when phase reaches `'done'`
+
+**v2 Extension:** Add new phases, new handlers, preserve v1 paths.
+
+### Error Handling Pattern
+
+- All service methods wrapped in try/catch
+- Error messages include context (what failed, why, relevant IDs)
+- User-facing messages in Slovak (from system prompts)
+- Descriptive error logging to console
+- Thread kept open for retry (except critical failures like thread create error)
+
+### Discord Integration Details
+
+- **Thread type:** `ChannelType.PrivateThread` (NOT Forum)
+- **Intents required:** `Guilds`, `GuildMessages`, `MessageContent` (MessageContent is privileged)
+- **Thread naming:** `Issue: {username} - {YYYY-MM-DD}` (sortable, descriptive)
+- **Auto-archive:** 60 minutes of inactivity
+- **Invitable:** `false` (privacy enforcement)
 
 ---
 
 ## Test Infrastructure
 
-### Recommended for Bot Project
+### Framework & Configuration
 
-| Category | Technology | Rationale |
-|----------|-----------|-----------|
-| Test Framework | Vitest 4.x | Faster than Jest, ESM-native, matches game monorepo client tests |
-| Mocking | Vitest built-in (`vi.mock`, `vi.fn`) | No extra dependency needed |
-| Coverage | `@vitest/coverage-v8` | Match game monorepo pattern |
-| Test Location | `tests/` directory | Cleaner for small projects vs co-located |
-| Test Naming | `*.spec.ts` | Match game monorepo convention |
+- **Test runner:** Vitest 4.1.2
+- **Environment:** Node.js
+- **File location:** `tests/` directory (not co-located with source)
+- **File naming:** `*.spec.ts`
+- **Coverage provider:** v8
 
-### What to Test
+### Mocking Patterns (CRITICAL for v2)
 
-| Component | Test Strategy |
-|-----------|--------------|
-| `claude.service.ts` | Mock `@anthropic-ai/sdk` — test conversation flow, summarization prompt, similarity comparison logic |
-| `github.service.ts` | Mock `@octokit/rest` — test issue fetching, creation, comment attachment, pagination |
-| `thread.service.ts` | Mock `discord.js` — test thread creation, message sending, archiving |
-| `issue.ts` (command) | Mock all services — test slash command handler flow, confirmation logic |
-| `message.handler.ts` | Mock services — test multi-turn conversation routing, scope filtering |
-| `config.ts` | Test env var validation, missing var errors |
+#### ESM Module-Level Mocking with vi.hoisted() (Lesson #14)
+
+**Pattern:** All external API mocks MUST use `vi.hoisted()` pattern for ESM projects:
+
+```typescript
+// CORRECT (from claude.service.spec.ts):
+const { mockCreate } = vi.hoisted(() => ({
+  mockCreate: vi.fn(),
+}));
+
+vi.mock('@anthropic-ai/sdk', () => {
+  class MockAnthropic {
+    messages = { create: mockCreate };
+  }
+  return { default: MockAnthropic };
+});
+
+// Then import service under test AFTER mocking
+import { ClaudeService } from '../../src/services/claude.service.js';
+```
+
+**Why:** ESM hoisting rules prevent module-scope `vi.fn()` without `vi.hoisted()`. The pattern lifts function definitions before import analysis.
+
+#### Config Mocking
+
+```typescript
+vi.mock('../../src/config.js', () => ({
+  config: {
+    anthropic: { apiKey: 'test-key', model: 'test-model' },
+    similarityThreshold: '0.7',
+    // ... other fields
+  },
+}));
+```
+
+#### Service Mocking (for integration-level tests)
+
+```typescript
+function createMockServices() {
+  return {
+    claudeService: {
+      chat: vi.fn(),
+      summarize: vi.fn(),
+      isGameRelated: vi.fn(),
+      findSimilarIssue: vi.fn(),
+    },
+    githubService: {
+      fetchAllIssues: vi.fn(),
+      createIssue: vi.fn(),
+      addComment: vi.fn(),
+      refreshCache: vi.fn(),
+    },
+    threadService: {
+      createPrivateThread: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      closeThread: vi.fn().mockResolvedValue(undefined),
+    },
+  };
+}
+```
+
+#### Discord.js Mocking
+
+```typescript
+// Mock Message, ThreadChannel, User objects as plain objects with required properties
+function createMockMessage(content: string, userId: string, threadId: string) {
+  return {
+    content,
+    author: { id: userId, username: 'testuser' },
+    channel: { id: threadId, url: 'https://discord.com/channels/test' },
+  };
+}
+```
+
+### Test Coverage Areas (v1)
+
+- Config validation (missing vars, defaults)
+- Claude service: chat, summarize, scope filter, similarity
+- GitHub service: fetch (with cache), create, comment, rate limit errors
+- Thread service: create, send, close
+- Message handler: full state machine (all phases, edge cases, error handling)
+
+### v2 Test Requirements
+
+- **AgentService:** Mock `@anthropic-ai/sdk/agent` spawn and tool responses
+- **v2 command handlers:** Mock ThreadService, MessageHandler, no real Discord API
+- **Message handler extensions:** New phase handlers, routing logic (isolated from v1 tests)
+- **Integration tests:** Multi-turn conversations with agent context (mocked agent)
+
+---
+
+## Technical Stack
+
+| Category | Technology | Version | Notes |
+|----------|-----------|---------|-------|
+| **Language** | TypeScript | ~5.9.2 | Strict mode, ES2022 target |
+| **Runtime** | Node.js | >= 20 LTS | Required by Octokit |
+| **Module System** | ESM | — | `"type": "module"` in package.json |
+| **Discord** | discord.js | 14.26.0 | Private thread support |
+| **Claude API** | @anthropic-ai/sdk | ^0.80.0 | Messages API v1 |
+| **Agent SDK** | @anthropic-ai/sdk (same pkg) | TBD (NEW for v2) | MUST verify exact import path and version |
+| **GitHub** | @octokit/rest | ^22.0.1 | REST API, pagination |
+| **Config** | dotenv | ^17.3.1 | Env var loading |
+| **Build (Dev)** | tsx | ^4.21.0 | Fast TS execution |
+| **Build (Prod)** | tsup | ^8.5.1 | TypeScript bundler |
+| **Test** | Vitest | ^4.1.2 | ESM-native, fast |
+| **Lint** | ESLint | ^9.8.0 | Flat config |
+| **Format** | Prettier | ^2.6.2 | Single quotes |
 
 ---
 
 ## Risks and Unexpected Findings
 
-### CRITICAL FINDING: Forum Channels Cannot Have Private Threads
-- **Problem:** Requirements specify "a designated Discord Forum channel" with "private threads." Discord Forum channels only support public threads (PublicThread type 11). Private threads (type 12) only work in regular text channels.
-- **Impact:** The bot CANNOT use a Forum channel if privacy is a hard requirement. The Planner must choose an alternative approach (recommended: private threads in a regular text channel).
-- **Severity:** HIGH — fundamentally changes the Discord integration design.
+### CRITICAL FINDING #1: Claude Agent SDK Dependency — Unverified
 
-### CRITICAL FINDING: Target GitHub Repository Does Not Exist
-- **Problem:** Requirements reference `Kazarr/BySwordandSeal` but this repository does not exist on GitHub. The actual game repository is `Kazarr/By-Sword-and-Seal-Playground`.
-- **Impact:** The bot's GitHub integration target is ambiguous. If the repo doesn't exist at runtime, all GitHub operations will fail with 404.
-- **Recommendation:** Make GitHub owner/repo configurable via environment variables. The user may plan to create the repo separately.
+**Problem:** Requirements specify Agent SDK integration (`@anthropic-ai/sdk` with agent module) but:
+- Current package.json lists `@anthropic-ai/sdk` v0.80.0 (main SDK)
+- Agent SDK exact package name, version, and Node.js/ESM compatibility are UNVERIFIED
+- Integration pattern (how to spawn session, pass tools, configure filesystem scope) is UNKNOWN
 
-### MEDIUM RISK: Anthropic SDK Has No Embeddings API
-- **Problem:** The requirements mention "Claude API embeddings or similarity" but the Anthropic SDK does not provide an embeddings endpoint. Semantic comparison must be done via prompt-based classification (sending all issues to Claude and asking for the best match).
-- **Impact:** Higher token cost per comparison, and the approach may not scale well beyond ~200 issues (context window limits). For v1 with near-zero issues, this is fine.
+**Impact:** Planner cannot finalize v2 design until Agent SDK specifics are confirmed.
 
-### MEDIUM RISK: Privileged Intent Required (MessageContent)
-- **Problem:** Reading message content in threads requires the `MessageContent` privileged intent, which must be manually enabled in the Discord Developer Portal. If not enabled, the bot receives empty message content.
-- **Impact:** First-time setup requires a manual step in the Discord Developer Portal. Should be documented in README/setup guide.
+**Action Required:**
+- [ ] Verify exact npm package name (is it `@anthropic-ai/sdk`? Separate package?)
+- [ ] Confirm current stable version compatible with Node.js 20+
+- [ ] Confirm ESM compatibility (no CommonJS-only exports)
+- [ ] Research session spawn API and tool definition pattern
+- [ ] Research filesystem tool configuration (how to limit scope to a directory, read-only access)
+- [ ] Confirm whether it reuses `ANTHROPIC_API_KEY` or requires separate key
+- [ ] Verify if tools can be configured for local filesystem only (no external APIs)
 
-### LOW RISK: Bot Restart Loses Conversation State
-- **Problem:** The bot stores active conversations in-memory (Map keyed by thread ID). If the bot process restarts, all in-progress conversations are lost.
-- **Impact:** Accepted limitation per requirements ("stateless for v1"). Orphaned threads will need manual cleanup. The bot could attempt to detect orphaned threads on startup and send a "conversation interrupted" message.
+**Mitigation for Planner:** Document as assumption that Agent SDK is available and compatible. v1 Implementor can proceed independently. v2 Planner will address in next phase once SDK is confirmed.
 
-### LOW RISK: No .nvmrc in Game Monorepo
-- **Problem:** The game monorepo doesn't have an `.nvmrc` file. Current local Node.js is v24.7.0 but the bot's minimum is v20 (Octokit requirement).
-- **Impact:** The standalone project should include an `.nvmrc` pinning to Node.js 20 LTS for reproducibility.
+---
+
+### CRITICAL FINDING #2: Admin Permission Check in discord.js v14 — Pattern Unclear
+
+**Problem:** Requirements specify "all v2 commands gated to server admins only" but:
+- discord.js v14 doesn't provide built-in permission check decorator
+- Must manually read `interaction.member.permissions` and check `Administrator` flag
+- Exact API pattern for `PermissionsBitField.Flags.Administrator` not verified in this codebase
+
+**Impact:** v2 command handlers need working permission check. Without verification, implementation may fail.
+
+**Research Needed:**
+- [ ] Confirm `PermissionsBitField` import path and API
+- [ ] Confirm reading `interaction.member.permissions` contains admin flag
+- [ ] Confirm bitwiseAND check: `permissions.has(PermissionsBitField.Flags.Administrator)`
+- [ ] Test pattern with mock interaction
+
+**Expected Pattern (likely):**
+```typescript
+import { PermissionsBitField } from 'discord.js';
+
+if (!interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator)) {
+  await interaction.reply({ content: 'Admin only.', ephemeral: true });
+  return;
+}
+```
+
+**Mitigation:** Planner to research discord.js v14 permission API and provide confirmed pattern to Implementor.
+
+---
+
+### CRITICAL FINDING #3: Git Clone Management — Pattern & Location Undefined
+
+**Problem:** Requirements specify Agent SDK should access "fresh git pull of `By-Sword-and-Seal-Playground` repo" but:
+- Exact clone location (`./.cache/bss-game/`, `./repos/`, etc.) not specified
+- Git pull strategy not decided (every command? once per day? check timestamp?)
+- Minimal Node.js package choice (simple-git vs isomorphic-git vs child_process) not researched
+- Private GitHub repo access pattern unclear (token handling, error recovery)
+
+**Impact:** v2 `AgentService` needs to initialize codebase clone. Without clear strategy, Implementor will have to guess.
+
+**Research Needed:**
+- [ ] Decide clone location (relative to bot working directory)
+- [ ] Decide freshness strategy (e.g., "git pull if last pull >24h old")
+- [ ] Evaluate Node.js packages: simple-git (recommended, high-level), isomorphic-git (pure JS, no git binary), child_process (spawn git command)
+- [ ] Confirm private repo access via GitHub token (needs `git config credential.helper`)
+- [ ] Error handling: repo unavailable, network timeout, token expired
+
+**Recommendation for Planner:**
+- Use `simple-git` (npm package, high-level API, handles credentials cleanly)
+- Clone location: `./.cache/repos/bss-game/` (relative to cwd, not checked into git)
+- Freshness: Check `.git/FETCH_HEAD` timestamp; pull if >24h old OR first init
+- Error handling: Log error, return null codebase context, allow Claude to proceed without code
+
+---
+
+### MEDIUM FINDING: Artifact Proposal Heuristic Undefined
+
+**Problem:** `/workbench` command should "propose zero or more artifacts" based on conversation content. Requirements state:
+- "Bot analyzes dialogue and proposes artifacts (if any)"
+- Clear system prompt guidance provided
+- But exact criteria for triggering proposal not specified
+
+**Impact:** Planner needs to define heuristic (word count, explicit request, Claude confidence score).
+
+**Approach in v1 Context:** ClaudeService uses prompt-based heuristics (e.g., asking Claude "should we create an artifact?"). v2 likely follows same pattern.
+
+**Status:** Acceptable for Planner to defer. Implement as: "At conversation end, ask Claude: Do these messages suggest creating an analysis/story/research artifact? Respond with: PROPOSE: [type] or NO_ARTIFACT. Parse response."
+
+---
+
+### MEDIUM FINDING: Workbench Conversation Length & Timeout
+
+**Problem:** `/workbench` is "free-form NL conversation" but:
+- No maximum conversation length specified (memory/cost risk)
+- No explicit "end conversation" trigger specified
+- In-memory state pattern means restart loses ongoing workbench
+- 60-minute auto-archive may conflict with long conversations
+
+**Impact:** Planner should decide:
+- Max turns per conversation (e.g., 20 turns, 1 hour, or until user says "done")
+- Should workbench prompt user to confirm end, or auto-detect via Claude signal?
+
+**Current v1 Pattern:** `/issue` uses Claude signal (`[READY_TO_SUMMARIZE]`) to trigger phase transition. v2 `/workbench` likely needs similar pattern.
+
+**Status:** Acceptable for Planner. Suggest: "After each user message, Claude responds or asks clarifying question. When Claude detects conversation has reached a good endpoint, respond with [END_CONVERSATION]. Then bot asks Claude to propose artifacts."
+
+---
+
+### LOW FINDING: Label Creation Race Condition
+
+**Problem:** If GitHub labels `analysis`, `user-story`, `research` don't exist, bot should create them. But if v2 commands run in parallel, race condition could occur (both try to create same label).
+
+**Impact:** Minor. GitHub API returns 422 if label already exists during create attempt.
+
+**Mitigation:** Planner should decide:
+- Try to create label, catch 422, continue (silently ignore)
+- Pre-fetch labels on bot startup, cache, skip create if exists
+- Document that labels must be pre-created in repo (simplest)
+
+**Current Status:** Not blocking. Implementor can handle 422 gracefully.
+
+---
+
+### OBSERVATION: v1 Cancel Path Not Fully Specified
+
+**Finding:** v1 message handler (line 140-145) asks "upravit alebo zrusit?" (refine or cancel?) but doesn't explicitly handle "zrusit" (cancel) as a state transition. It just loops back to `'collecting'` phase for both refine and any other response.
+
+**Impact:** If user responds "zrusit", it's processed as a normal collecting message, which Claude tries to incorporate into feedback. This is a design quirk, not a bug, but worth noting for v2.
+
+**v2 Implication:** v2 command handlers should be more explicit about state transitions. Add explicit `'canceling'` phase if needed to handle "cancel" cleanly.
+
+---
+
+### LOW FINDING: Agent SDK Tool Scoping
+
+**Problem:** Agent SDK tools (file read, directory listing, grep) must be **read-only** and **scoped to codebase directory only**. Requirements are clear, but:
+- Exact mechanism for tool scoping not researched (environment variable? path prefix? sandboxing?)
+- Tool error messages if user tries to access parent directories not specified
+
+**Impact:** Medium risk during v2 implementation. Tools must be carefully configured.
+
+**Mitigation:** Planner should research Agent SDK tool configuration and provide security checklist to Implementor:
+- [ ] Tools only accessible within codebase directory
+- [ ] No write operations
+- [ ] No git commands
+- [ ] Error message if attempting parent directory access
 
 ---
 
 ## Recommendations for Planner
 
-1. **Resolve the Forum vs. Text Channel decision** — Private threads are ONLY available in text channels. Decide between: (A) private threads in a text channel (recommended — full privacy), (B) public forum posts (no privacy), or (C) DM-based conversations (disconnected from server). This is the most impactful architectural decision.
+### 1. **Verify Agent SDK Availability and API**
 
-2. **Use prompt-based semantic similarity** — Since Anthropic has no embeddings API, use Claude to compare the new issue summary against all existing issue titles/descriptions. For v1 with <100 issues, this is efficient. Include a configurable similarity threshold.
+Before designing v2 in detail:
+- Confirm `@anthropic-ai/sdk` includes Agent SDK module (or separate package)
+- Confirm Node.js 20+ compatibility
+- Confirm ESM compatibility
+- Document exact session spawn API
+- Document tool definition pattern
+- Plan AgentService interface based on SDK API
 
-3. **Make GitHub target configurable** — Use `GITHUB_OWNER` and `GITHUB_REPO` env vars instead of hardcoding `Kazarr/BySwordandSeal`. The repo may not exist yet or may use a different name.
+**Why:** All v2 command designs depend on this. Incorrect assumptions = rework.
 
-4. **Use Vitest (not Jest)** — Match the game monorepo's direction (Vitest for client + shared, moving away from Jest). Vitest has better ESM support and is faster.
+---
 
-5. **Use `tsx` for development, `tsup` for production build** — `tsx` provides fast TypeScript execution without compilation step for dev. `tsup` bundles for production. Alternatively, just use `tsx` for both (simpler, slightly larger footprint).
+### 2. **Research Discord.js v14 Permission API**
 
-6. **Carry over these conventions from the game monorepo:** Single quotes, strict TypeScript, ES modules, `dotenv/config` import at entry point, `.env.example` pattern, bracket notation for `process.env['KEY']`.
+Before implementing v2 command handlers:
+- Confirm `PermissionsBitField.Flags.Administrator` check pattern
+- Test with mock interaction in test environment
+- Document exact error message for non-admin users
 
-7. **Document the Discord Developer Portal setup** — The bot needs: (a) application created, (b) bot token generated, (c) `MessageContent` privileged intent enabled, (d) bot invited to server with correct permissions. This should be in a setup section of the README.
+**Why:** Permission check must be correct and consistent across all four v2 commands.
 
-8. **In-memory conversation state with thread ID key** — Use a `Map<string, ConversationState>` to track active conversations. Each entry holds the Claude message history and current state (collecting / summarizing / confirming / done). On thread archive or timeout, remove the entry.
+---
 
-9. **Conversation language** — The confirmation prompt uses Slovak ("Vytvorit?") per requirements. The system prompt for Claude should specify that the conversation is in Slovak but the GitHub issue should be written in English (or configurable).
+### 3. **Define Git Clone Strategy**
 
-10. **Issue caching strategy** — Fetch all issues from GitHub when the bot starts and cache them. Refresh the cache either (a) after each issue creation, or (b) periodically (every 15 minutes). For v1, per-invocation fetch is also acceptable given the low volume.
+Before implementing AgentService:
+- Choose clone location (recommend: `./.cache/repos/bss-game/`)
+- Choose freshness strategy (recommend: 24h TTL with `FETCH_HEAD` timestamp)
+- Choose Node.js package (recommend: `simple-git`)
+- Plan error recovery (log, return null, allow Claude to proceed)
 
-11. **Test strategy** — Mock all external APIs (Discord, Claude, GitHub) in unit tests. No integration tests with real APIs for v1 (cost, rate limits, test isolation). Use Vitest's `vi.mock()` for module-level mocking.
+**Why:** AgentService initialization depends on this. v1 Implementor can proceed independently.
 
-12. **Implementation order suggestion:**
-    1. Project scaffolding (package.json, tsconfig, config, etc.)
-    2. `config.ts` — env var loading and validation
-    3. `github.service.ts` — issue CRUD (most testable, no Discord dependency)
-    4. `claude.service.ts` — conversation + similarity (testable in isolation)
-    5. `thread.service.ts` — Discord thread lifecycle
-    6. `commands/issue.ts` — slash command handler
-    7. `handlers/message.handler.ts` — thread message routing
-    8. `index.ts` — bot startup, event wiring
-    9. Command registration script
-    10. Tests for all services
+---
+
+### 4. **Design Message Handler Extension for v2**
+
+Message handler state machine is shared code used by both v1 and v2:
+- Add new `ConversationPhase` values: `'v2-analyzing'`, `'v2-story-drafting'`, `'v2-research-investigating'`, `'v2-workbench'`
+- Add optional `commandType` field to `ConversationState` to route to correct handler
+- Plan new handler methods (e.g., `handleV2Analyzing`, `handleV2Workbench`)
+- Plan cleanup logic (all v2 phases eventually reach `'done'` and state entry deleted)
+
+**Why:** Message handler is critical shared component. Design must be watertight.
+
+---
+
+### 5. **Plan Claude Service Extensions**
+
+ClaudeService will add new methods for artifact generation:
+- `generateCodeAnalysis(question: string, codeContext: string): Promise<string>`
+- `generateUserStory(requirements: string, codeContext?: string): Promise<string>`
+- `generateResearch(question: string, codeContext?: string): Promise<string>`
+- `proposeArtifacts(conversation: ConversationMessage[]): Promise<ArtifactProposal[]>`
+
+Design system prompts for each. Determine if they reuse existing `messages.create()` or need new methods.
+
+**Why:** All v2 commands depend on these. Stable API design = isolated implementation.
+
+---
+
+### 6. **Define Admin Permission Check Pattern**
+
+All four v2 commands must check admin status:
+```typescript
+// Design pattern:
+const isAdmin = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+if (!isAdmin) {
+  await interaction.reply({ content: 'Len administrátori...', ephemeral: true });
+  return;
+}
+```
+
+Confirm exact API and test pattern.
+
+**Why:** Consistency and correctness across all v2 commands.
+
+---
+
+### 7. **Plan Artifact Confirmation Flow**
+
+All v2 commands end with user confirmation before GitHub issue creation:
+- Show artifact preview
+- Ask user to confirm ("Vytvoriť?")
+- If yes: create GitHub issue with appropriate label
+- If no: ask improve/cancel → loop or close
+
+Design is identical to v1 confirmation flow; reuse pattern.
+
+**Why:** Familiar UX, reduces implementation complexity.
+
+---
+
+### 8. **Identify v1/v2 Boundary in Message Handler**
+
+Message handler is extended (not replaced) for v2:
+- v1 phases: `'collecting'`, `'summarizing'`, `'confirming'`, `'done'` → v1 handlers unchanged
+- v2 phases: `'v2-analyzing'`, `'v2-story-drafting'`, `'v2-research-investigating'`, `'v2-workbench'` → new v2 handlers
+- Route based on phase or `commandType` field
+
+Ensure v1 tests still pass; v2 adds new tests for v2 handlers.
+
+**Why:** Backward compatibility non-negotiable.
+
+---
+
+### 9. **Plan Test Mocking Strategy for Agent SDK**
+
+Agent SDK session spawn and tool responses must be fully mocked:
+- Mock `@anthropic-ai/sdk/agent` module (or appropriate import path)
+- Mock session.run() to return tool calls and final response
+- Mock file tool: return file contents from in-memory test fixture
+- Mock grep tool: return matching lines from test fixture
+- Mock ls tool: return directory listing from test fixture
+
+Pattern likely follows existing `vi.hoisted()` + `vi.mock()` pattern.
+
+**Why:** v2 tests must not require real codebase access. All external APIs mocked.
+
+---
+
+### 10. **Document v2 Extensibility Contract**
+
+Create a design document for Implementor with:
+- ConversationPhase enum changes (exact new values)
+- ConversationState interface changes (new optional fields)
+- MessageHandler extension pattern (new handler methods)
+- ClaudeService new methods (signatures, system prompts)
+- AgentService interface (public API)
+- Command handler pattern (check channel, check admin, create thread, init state)
+- Test patterns (mock setup for v2 commands)
+
+**Why:** Clear specification = correct implementation on first try.
+
+---
+
+## Current State vs Target State
+
+| Area | Current (v1) | Target (v2) |
+|------|--------------|-------------|
+| **Slash Commands** | 1 command (`/issue`) | 5 commands (`/issue` + `/analyze`, `/story`, `/research`, `/workbench`) |
+| **ConversationPhase** | 4 phases: collecting, summarizing, confirming, done | 8 phases: v1 + v2-analyzing, v2-story-drafting, v2-research-investigating, v2-workbench |
+| **Services** | 3 services: Claude, GitHub, Thread | 4 services: (same 3 + Agent SDK spawning) |
+| **Message Handler** | v1 state machine (4 phases) | Extended state machine (4 v1 phases isolated, 4 v2 phases added) |
+| **Permission Checks** | None (v1 open to all) | Admin check on all v2 commands |
+| **Artifact Types** | Issue (single label or none) | Issue + label set (analysis, user-story, research) |
+| **Code Context** | None | Agent SDK provides code-aware context |
+| **External Dependency** | None new | Agent SDK (NEW) |
+
+---
+
+## File Organization (v1 + v2 Preview)
+
+```
+src/
+├── index.ts                          # Entry point (extend: add v2 routing)
+├── config.ts                         # Unchanged
+├── types/
+│   └── index.ts                      # Extend: add v2 phases + ArtifactProposal
+├── services/
+│   ├── claude.service.ts             # Extend: add artifact generation
+│   ├── github.service.ts             # Unchanged (labels already supported)
+│   ├── thread.service.ts             # Unchanged
+│   └── agent.service.ts              # NEW (Agent SDK wrapper)
+├── handlers/
+│   └── message.handler.ts            # Extend: add v2 phase handlers
+└── commands/
+    ├── index.ts                      # Extend: register v2 commands
+    ├── issue.ts                      # Unchanged (v1)
+    ├── analyze.ts                    # NEW (v2)
+    ├── story.ts                      # NEW (v2)
+    ├── research.ts                   # NEW (v2)
+    └── workbench.ts                  # NEW (v2)
+
+tests/
+├── config.spec.ts                    # Unchanged
+├── services/
+│   ├── claude.service.spec.ts        # Extend: test new artifact methods
+│   ├── github.service.spec.ts        # Unchanged
+│   ├── thread.service.spec.ts        # Unchanged
+│   └── agent.service.spec.ts         # NEW (mocked Agent SDK)
+├── handlers/
+│   └── message.handler.spec.ts       # Extend: add v2 phase tests
+└── commands/
+    └── *.spec.ts                     # NEW: tests for v2 commands
+```
+
+---
+
+## Summary for Planner
+
+**v1 Status:** Fully implemented, 9 source files + 5 test files. Standalone Discord bot with single feedback collection command. Services are modular, state machine is extensible.
+
+**v2 Requirements:** Add four new slash commands with code-aware analysis via Agent SDK. Reuse v1 infrastructure (thread service, message handler, GitHub service). Extend types, services, and state machine.
+
+**Key Extensibility Points:**
+1. `src/types/index.ts` — Add v2 phases and optional `commandType`
+2. `src/commands/index.ts` — Register four new commands
+3. `src/commands/*.ts` — Implement four new handlers (follow v1 pattern)
+4. `src/index.ts` — Route new commands
+5. `src/handlers/message.handler.ts` — Add v2 phase handlers (preserve v1)
+6. `src/services/claude.service.ts` — Add artifact generation methods
+7. `src/services/agent.service.ts` — NEW, spawn Agent SDK sessions
+
+**Unverified Assumptions (Research Required):**
+- Agent SDK package name, version, ESM compatibility, API pattern
+- Discord.js v14 admin permission check API
+- Git clone management strategy (location, freshness, package choice)
+
+**Test Infrastructure:** Vitest with `vi.hoisted()` pattern for ESM mocking. Existing patterns sufficient for v2 mocks.
+
+**Risk:** None blocking. Agent SDK research should happen before detailed design. Permission check and git strategy can be researched in parallel with design.
+
